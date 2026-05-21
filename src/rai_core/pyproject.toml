@@ -39,6 +39,7 @@ dependencies = [
     "pydub>=0.25.1,<0.26.0",
     "streamlit>=1.44,<2.0.0",
     "numpy<2.0",
+    "httpx[socks]>=0.28.1",
 ]
 
 [project.scripts]
