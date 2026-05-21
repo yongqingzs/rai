@@ -180,3 +180,5 @@ src/rai_interfaces
 
 # Demo assets
 demo_assets/
+demo/
+panda/

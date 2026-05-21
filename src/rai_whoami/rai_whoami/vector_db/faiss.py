@@ -75,7 +75,7 @@ def get_faiss_client(
     if embeddings_model is None:
         vdb_kwargs = json.load(open(Path(root_dir) / "vdb_kwargs.json"))
         embeddings_model = initialize_embeddings(
-            vdb_kwargs["embeddings"]["class"], **vdb_kwargs
+            vdb_kwargs["embeddings"]["class"], **vdb_kwargs["embeddings"]
         )
 
     vdb_client = FAISS.load_local(

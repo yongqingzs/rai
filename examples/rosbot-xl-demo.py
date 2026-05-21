@@ -26,7 +26,6 @@ from rai.agents.langchain import (
 from rai.communication.ros2 import ROS2Connector
 from rai.frontend.streamlit import run_streamlit_app
 from rai.tools.ros2 import (
-    GetObjectPositionsTool,
     GetROS2ImageConfiguredTool,
     GetROS2TransformConfiguredTool,
 )
@@ -35,7 +34,7 @@ from rai.tools.ros2.navigation.nav2_blocking import (
     NavigateToPoseBlockingTool,
 )
 from rai.tools.time import WaitForSecondsTool
-from rai_perception.tools import GetGrabbingPointTool
+from rai_perception.tools import GetObjectPositionsTool
 
 from rai_whoami import EmbodimentInfo
 
@@ -66,17 +65,7 @@ def initialize_agent() -> Runnable[ReActAgentState, ReActAgentState]:
             topic="/camera/camera/color/image_raw",
         ),
         WaitForSecondsTool(),
-        GetObjectPositionsTool(
-            connector=connector,
-            target_frame="map",
-            source_frame="sensor_frame",
-            camera_topic="/camera/camera/color/image_raw",
-            depth_topic="/camera/camera/depth/image_rect_raw",
-            camera_info_topic="/camera/camera/color/camera_info",
-            get_grabbing_point_tool=GetGrabbingPointTool(
-                connector=connector,
-            ),
-        ),
+        GetObjectPositionsTool(connector=connector),
         NavigateToPoseBlockingTool(
             connector=connector, frame_id="map", action_name="navigate_to_pose"
         ),
