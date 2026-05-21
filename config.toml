@@ -16,7 +16,7 @@ embeddings_model = "qwen27b"
 base_url = "http://192.168.2.30:8000/v1"
 
 [ollama]
-base_url = "http://localhost:11434"
+base_url = "http://10.0.88.103:11434"
 simple_model = "qwen3.6:27b-q4_K_M"
 complex_model = "qwen3.6:27b-q4_K_M"
 embeddings_model = "nomic-embed-text-v2-moe:latest"
