@@ -43,6 +43,7 @@ nomad = [
 
 [tool.uv]
 package = false
+index-url = "https://mirrors.aliyun.com/pypi/simple/"
 
 [tool.uv.sources]
 rai_core = { path = "src/rai_core", editable = true }
