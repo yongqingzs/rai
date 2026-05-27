@@ -30,9 +30,15 @@ from pathlib import Path
 from typing import List, Optional
 
 import streamlit as st
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import Runnable, RunnableConfig
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import END, START, StateGraph, add_messages
 from langgraph.runtime import Runtime
 from rai import get_embeddings_model, get_llm_model
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
@@ -45,7 +51,7 @@ from rai.agents.langchain.core.react_agent import (
 from rai.memory import MemoryManager, load_memory_config
 from rai.tools.memory import MemoryTools, create_memory_tools
 from rai.tools.time import WaitForSecondsTool
-from typing_extensions import TypedDict
+from typing_extensions import Annotated, TypedDict
 
 # --- Constants ---
 
@@ -85,7 +91,10 @@ class AgentContext:
 
 
 class MemoryState(TypedDict):
-    messages: List[AIMessage | HumanMessage | ToolMessage | SystemMessage]
+    messages: Annotated[
+        List[AIMessage | HumanMessage | ToolMessage | SystemMessage | RemoveMessage],
+        add_messages,
+    ]
     summary: str
 
 
@@ -202,7 +211,7 @@ def build_memory_agent(
     inner_agent = create_react_runnable(
         llm=llm,
         tools=all_tools,
-        checkpointer=memory_mgr.checkpointer,
+        checkpointer=None,
         store=memory_mgr.store,
     )
 
@@ -219,9 +228,10 @@ def build_memory_agent(
             embodiment=embodiment_text,
             long_term_memory=ltm_text,
         )
-        non_system = [m for m in state["messages"] if not isinstance(m, SystemMessage)]
         return {
-            "messages": [SystemMessage(content=system_content)] + non_system,
+            "messages": [
+                SystemMessage(content=system_content, id="memory_system_prompt")
+            ],
             "summary": state.get("summary", ""),
         }
 
@@ -235,7 +245,16 @@ def build_memory_agent(
             threshold=token_threshold,
             keep_recent=keep_recent,
         )
-        return result
+        if result["messages"] is state["messages"]:
+            return {"summary": result["summary"]}
+
+        retained_ids = {m.id for m in result["messages"] if getattr(m, "id", None)}
+        removals = [
+            RemoveMessage(id=m.id)
+            for m in state["messages"]
+            if getattr(m, "id", None) and m.id not in retained_ids
+        ]
+        return {"messages": removals + result["messages"], "summary": result["summary"]}
 
     def run_react(
         state: MemoryState, runtime: Runtime[AgentContext], config: RunnableConfig
@@ -255,8 +274,8 @@ def build_memory_agent(
                 ),
                 context=ctx,
             )
-            # Return full message list (replace reducer in outer graph)
-            return {"messages": result["messages"], "summary": state.get("summary", "")}
+            new_messages = list(result["messages"][len(state["messages"]) :])
+            return {"messages": new_messages, "summary": state.get("summary", "")}
         except Exception as e:
             error_msg = AIMessage(content=f"Agent error: {e}")
             return {
@@ -333,6 +352,27 @@ def _get_user_ids(memory_mgr: MemoryManager, namespace: str) -> List[str]:
     return sorted(user_ids)
 
 
+def _graph_config(thread_id: str) -> RunnableConfig:
+    return RunnableConfig({"configurable": {"thread_id": thread_id}})
+
+
+def _load_thread_state(graph, thread_id: str) -> tuple[list, str]:
+    snapshot = graph.get_state(_graph_config(thread_id))
+    values = snapshot.values or {}
+    return list(values.get("messages", [])), values.get("summary", "")
+
+
+def _welcome_message() -> AIMessage:
+    return AIMessage(
+        content=(
+            "Hi! I'm a robot with persistent memory. "
+            "Our conversation is summarized when it gets long (short-term). "
+            "I'll proactively save important facts and locations to long-term memory. "
+            "Ask me to forget something and I'll delete matching memories directly."
+        )
+    )
+
+
 def run_memory_app():
     """Run the Streamlit app with persistent memory."""
     st.set_page_config(page_title="RAI Memory Demo", page_icon=":robot:")
@@ -386,16 +426,6 @@ def run_memory_app():
         selected_user if selected_user != "(default)" else "default"
     )
 
-    # Clear messages when switching sessions
-    current_thread = st.session_state.get("_last_thread")
-    if current_thread and current_thread != st.session_state.thread_id:
-        st.session_state["messages"] = [
-            AIMessage(
-                content="New session started. Previous conversation stored in memory."
-            )
-        ]
-    st.session_state["_last_thread"] = st.session_state.thread_id
-
     st.sidebar.markdown("---")
     st.sidebar.markdown("""
     **Short-term**: Conversation history within the selected session.
@@ -424,20 +454,23 @@ def run_memory_app():
         st.session_state["graph"] = graph
         st.session_state["memory_tools"] = memory_tools
         st.session_state["_last_user"] = user_id
-        st.session_state["messages"] = [
-            AIMessage(
-                content=(
-                    "Hi! I'm a robot with persistent memory. "
-                    "Our conversation is summarized when it gets long (short-term). "
-                    "I'll proactively save important facts and locations to long-term memory. "
-                    "Ask me to forget something and I'll delete matching memories directly."
-                )
-            )
-        ]
-        st.session_state["summary"] = ""
 
     graph = st.session_state["graph"]
     memory_tools = st.session_state["memory_tools"]
+
+    current_thread = st.session_state.get("_last_thread")
+    if (
+        "messages" not in st.session_state
+        or current_thread != st.session_state.thread_id
+        or st.session_state.get("_messages_user") != user_id
+    ):
+        restored_messages, restored_summary = _load_thread_state(
+            graph, st.session_state.thread_id
+        )
+        st.session_state["messages"] = restored_messages or [_welcome_message()]
+        st.session_state["summary"] = restored_summary
+        st.session_state["_last_thread"] = st.session_state.thread_id
+        st.session_state["_messages_user"] = user_id
 
     # --- Render messages ---
 
@@ -461,7 +494,8 @@ def run_memory_app():
         return
 
     # Normal conversation flow
-    st.session_state.messages.append(HumanMessage(content=prompt))
+    human_msg = HumanMessage(content=prompt)
+    st.session_state.messages.append(human_msg)
     st.chat_message("user").write(prompt)
 
     with st.chat_message("assistant"):
@@ -472,8 +506,7 @@ def run_memory_app():
         )
 
         input_state = {
-            "messages": st.session_state.messages,
-            "summary": st.session_state.get("summary", ""),
+            "messages": [human_msg],
         }
 
         result = streamlit_invoke(
@@ -485,12 +518,9 @@ def run_memory_app():
         )
 
         if result and "messages" in result:
-            # Replace full message list (graph may compress/enrich)
+            # Replace UI messages with the checkpointed thread state.
             st.session_state.messages = result["messages"]
-
-            # Update summary if provided
-            if "summary" in result:
-                st.session_state["summary"] = result["summary"]
+            st.session_state["summary"] = result.get("summary", "")
 
 
 def _clear_long_term_memory(config, user_id: str):
