@@ -14,7 +14,7 @@
 
 import base64
 import inspect
-from typing import Any, Callable, Dict, List, TypeVar
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 import cv2
 import numpy as np
@@ -188,11 +188,49 @@ def get_streamlit_cb(parent_container: DeltaGenerator) -> BaseCallbackHandler:
 
 
 def streamlit_invoke(
-    graph: Runnable[Any, Any], messages: List[BaseMessage], callables: List[Callable]
+    graph: Runnable[Any, Any],
+    messages: Optional[List[BaseMessage]] = None,
+    callables: Optional[List[Callable]] = None,
+    thread_id: Optional[str] = None,
+    context: Optional[Any] = None,
+    input_state: Optional[Dict[str, Any]] = None,
 ):
-    if not isinstance(callables, list):
-        raise TypeError("callables must be a list")
-    return graph.invoke(
-        {"messages": messages},
-        config=RunnableConfig({"callbacks": callables, "recursion_limit": 100}),
-    )
+    """Invoke a LangGraph graph with Streamlit callbacks.
+
+    Parameters
+    ----------
+    graph : Runnable
+        The LangGraph graph to invoke
+    messages : Optional[List[BaseMessage]]
+        Messages to pass as input (use input_state for full state dicts)
+    callables : Optional[List[Callable]]
+        Callback handlers for streaming
+    thread_id : Optional[str]
+        Thread ID for checkpointing
+    context : Optional[Any]
+        Runtime context for the graph
+    input_state : Optional[Dict[str, Any]]
+        Full state dict to pass as input (overrides messages if provided)
+    """
+    configurable: Dict[str, Any] = {"recursion_limit": 100}
+    if thread_id is not None:
+        configurable["thread_id"] = thread_id
+
+    if input_state is not None:
+        state_input = input_state
+    elif messages is not None:
+        state_input = {"messages": messages}
+    else:
+        state_input = {}
+
+    config_dict: Dict[str, Any] = {**configurable}
+    if callables:
+        config_dict["callbacks"] = callables
+
+    invoke_kwargs: Dict[str, Any] = {
+        "input": state_input,
+        "config": RunnableConfig(config_dict),
+    }
+    if context is not None:
+        invoke_kwargs["context"] = context
+    return graph.invoke(**invoke_kwargs)

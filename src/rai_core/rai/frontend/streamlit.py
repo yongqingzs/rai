@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from typing import Any, Optional
 
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -22,7 +22,12 @@ from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
 from rai.messages import HumanMultimodalMessage
 
 
-def run_streamlit_app(agent: Runnable[Any, Any], page_title: str, initial_message: str):
+def run_streamlit_app(
+    agent: Runnable[Any, Any],
+    page_title: str,
+    initial_message: str,
+    thread_id: Optional[str] = None,
+):
     st.title(page_title)
     st.markdown("---")
 
@@ -53,5 +58,8 @@ def run_streamlit_app(agent: Runnable[Any, Any], page_title: str, initial_messag
         with st.chat_message("assistant"):
             st_callback = get_streamlit_cb(st.container())
             streamlit_invoke(
-                st.session_state["graph"], st.session_state.messages, [st_callback]
+                st.session_state["graph"],
+                st.session_state.messages,
+                [st_callback],
+                thread_id=thread_id,
             )

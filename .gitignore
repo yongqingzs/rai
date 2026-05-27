@@ -182,3 +182,7 @@ src/rai_interfaces
 demo_assets/
 demo/
 panda/
+**.db
+**.db-shm
+**.db-wal
+**.bin

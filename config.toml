@@ -54,3 +54,11 @@ transcription_model_name = "tiny"
 vendor = "ElevenLabs"
 voice = ""
 speaker_device_name = "default"
+
+[memory]
+enabled = true
+backend = "sqlite"
+short_term_path = "data/checkpoints.db"
+long_term_path = "data/store.db"
+connection = ""
+namespace = "default"
