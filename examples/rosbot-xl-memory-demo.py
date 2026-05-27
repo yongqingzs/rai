@@ -96,6 +96,7 @@ class MemoryState(TypedDict):
         add_messages,
     ]
     summary: str
+    system_prompt: str
 
 
 def _load_embodiment(path: Path) -> str:
@@ -228,10 +229,14 @@ def build_memory_agent(
             embodiment=embodiment_text,
             long_term_memory=ltm_text,
         )
+        removals = [
+            RemoveMessage(id=m.id)
+            for m in state["messages"]
+            if isinstance(m, SystemMessage) and getattr(m, "id", None)
+        ]
         return {
-            "messages": [
-                SystemMessage(content=system_content, id="memory_system_prompt")
-            ],
+            "messages": removals,
+            "system_prompt": system_content,
             "summary": state.get("summary", ""),
         }
 
@@ -266,20 +271,27 @@ def build_memory_agent(
         )
         configurable = config.get("configurable", {})
         try:
+            conversation_messages = [
+                m for m in state["messages"] if not isinstance(m, SystemMessage)
+            ]
+            react_messages = [
+                SystemMessage(content=state["system_prompt"]),
+                *conversation_messages,
+            ]
             result = inner_agent.invoke(
-                {"messages": state["messages"]},
+                {"messages": react_messages},
                 RunnableConfig(
                     callbacks=config.get("callbacks", []),
                     configurable=configurable,
                 ),
                 context=ctx,
             )
-            new_messages = list(result["messages"][len(state["messages"]) :])
+            new_messages = list(result["messages"][len(react_messages) :])
             return {"messages": new_messages, "summary": state.get("summary", "")}
         except Exception as e:
             error_msg = AIMessage(content=f"Agent error: {e}")
             return {
-                "messages": list(state["messages"]) + [error_msg],
+                "messages": [error_msg],
                 "summary": state.get("summary", ""),
             }
 
@@ -339,17 +351,111 @@ def _get_session_ids(memory_mgr: MemoryManager) -> List[str]:
     return sorted(thread_ids)
 
 
+def _get_latest_session_id(memory_mgr: MemoryManager) -> Optional[str]:
+    for cp in memory_mgr.checkpointer.list(None, limit=200):
+        tid = cp.config.get("configurable", {}).get("thread_id")
+        if tid:
+            return tid
+    return None
+
+
+def _user_profile_namespace(namespace: str) -> tuple[str, str, str]:
+    return (namespace, "__users__", "profiles")
+
+
+def _add_user_profile(memory_mgr: MemoryManager, namespace: str, user_id: str):
+    memory_mgr.store.put(
+        _user_profile_namespace(namespace),
+        user_id,
+        {"user_id": user_id, "created_at": time.time(), "deleted": False},
+    )
+
+
 def _get_user_ids(memory_mgr: MemoryManager, namespace: str) -> List[str]:
-    """Get unique user_ids from store namespaces."""
-    user_ids = set()
+    """Get unique user_ids from profiles and memory namespaces."""
+    user_ids = {"default"}
+    deleted_user_ids = set()
+    try:
+        profiles = memory_mgr.store.search(
+            _user_profile_namespace(namespace), query="", limit=200
+        )
+        for profile in profiles:
+            profile_user_id = profile.value.get("user_id", profile.key)
+            if profile.value.get("deleted"):
+                deleted_user_ids.add(profile_user_id)
+                user_ids.discard(profile_user_id)
+            else:
+                user_ids.add(profile_user_id)
+    except Exception:
+        pass
+
     try:
         namespaces = memory_mgr.store.list_namespaces(prefix=(namespace,), limit=200)
         for ns in namespaces:
-            if len(ns) >= 2:
-                user_ids.add(ns[1])
+            if len(ns) >= 2 and ns[1] != "__users__":
+                if ns[1] not in deleted_user_ids:
+                    user_ids.add(ns[1])
     except Exception:
         pass
     return sorted(user_ids)
+
+
+def _delete_session(memory_mgr: MemoryManager, thread_id: str):
+    memory_mgr.checkpointer.delete_thread(thread_id)
+
+
+def _delete_user_long_term_memory(
+    memory_mgr: MemoryManager, namespace: str, user_id: str
+) -> int:
+    deleted = 0
+    profile_ns = _user_profile_namespace(namespace)
+    try:
+        memory_mgr.store.put(
+            profile_ns,
+            user_id,
+            {"user_id": user_id, "deleted": True, "deleted_at": time.time()},
+        )
+        deleted += 1
+    except Exception:
+        pass
+
+    for schema in ("facts", "spatial"):
+        ns = (namespace, user_id, schema)
+        try:
+            items = memory_mgr.store.search(ns, query="", limit=1000)
+            for item in items:
+                memory_mgr.store.delete(ns, item.key)
+                deleted += 1
+        except Exception:
+            pass
+    return deleted
+
+
+def _list_long_term_memory_items(memory_mgr: MemoryManager, namespace: str, user_id: str):
+    items = []
+    for schema in ("facts", "spatial"):
+        ns = (namespace, user_id, schema)
+        try:
+            for item in memory_mgr.store.search(ns, query="", limit=200):
+                items.append((schema, ns, item.key, item.value))
+        except Exception:
+            pass
+    return items
+
+
+def _format_long_term_item(schema: str, key: str, value: dict) -> str:
+    if schema == "facts":
+        text = value.get("text", str(value))
+        return f"{text[:80]}{'...' if len(text) > 80 else ''}"
+
+    location = value.get("location", key)
+    pose = value.get("pose")
+    if pose:
+        return (
+            f"{location} ({pose.get('x', '?')}, {pose.get('y', '?')}, "
+            f"{pose.get('z', '?')})"
+        )
+    return str(location)
 
 
 def _graph_config(thread_id: str) -> RunnableConfig:
@@ -394,52 +500,123 @@ def run_memory_app():
 
     st.sidebar.subheader("Short-Term Memory")
     session_ids = _get_session_ids(memory_mgr)
+    latest_session_id = _get_latest_session_id(memory_mgr)
     if not session_ids:
         st.sidebar.info("No sessions yet. Start a conversation.")
+    forced_thread_id = st.session_state.pop("_new_thread_id", None)
+    current_thread_id = st.session_state.get("thread_id") or latest_session_id
+    selected_thread_id = forced_thread_id or current_thread_id
+    session_options = ["(new session)"] + session_ids
+    if selected_thread_id and selected_thread_id not in session_options:
+        session_options.insert(1, selected_thread_id)
+    default_index = (
+        session_options.index(selected_thread_id)
+        if selected_thread_id in session_options
+        else 0
+    )
     selected_session = st.sidebar.selectbox(
         "Session (Thread)",
-        options=session_ids if session_ids else ["(new session)"],
-        index=0 if not session_ids else min(0, len(session_ids)),
+        options=session_options,
+        index=default_index,
         help="Different sessions keep separate conversation history.",
     )
-    if st.sidebar.button("+ New Session"):
-        st.session_state.thread_id = f"session-{int(time.time())}"
-        st.rerun()
 
-    st.sidebar.subheader("Long-Term Memory")
-    user_ids = _get_user_ids(memory_mgr, config.namespace)
-    if not user_ids:
-        st.sidebar.info("No users with long-term memories yet.")
-    selected_user = st.sidebar.selectbox(
-        "User",
-        options=user_ids if user_ids else ["(default)"],
-        index=0,
-        help="Long-term facts are scoped to the selected user.",
-    )
+    if st.sidebar.button("+ New Session"):
+        st.session_state["_new_thread_id"] = f"session-{int(time.time())}"
+        st.rerun()
 
     st.session_state.thread_id = (
         selected_session
         if selected_session != "(new session)"
         else st.session_state.get("thread_id", f"session-{int(time.time())}")
     )
-    st.session_state.user_id = (
-        selected_user if selected_user != "(default)" else "default"
+
+    can_delete_session = st.session_state.thread_id in session_ids
+    if st.sidebar.button("Delete Session", disabled=not can_delete_session):
+        _delete_session(memory_mgr, st.session_state.thread_id)
+        st.session_state.pop("messages", None)
+        st.session_state.pop("summary", None)
+        st.session_state.pop("_last_thread", None)
+        st.session_state["_new_thread_id"] = f"session-{int(time.time())}"
+        st.rerun()
+
+    st.sidebar.subheader("Long-Term Memory")
+    user_ids = _get_user_ids(memory_mgr, config.namespace)
+    if not user_ids:
+        st.sidebar.info("No users with long-term memories yet.")
+    selected_user_id = st.session_state.pop("_selected_user_id", None)
+    if selected_user_id and selected_user_id not in user_ids:
+        user_ids.append(selected_user_id)
+        user_ids = sorted(user_ids)
+    default_user_index = (
+        user_ids.index(selected_user_id)
+        if selected_user_id in user_ids
+        else user_ids.index(st.session_state.user_id)
+        if st.session_state.get("user_id") in user_ids
+        else 0
+    )
+    selected_user = st.sidebar.selectbox(
+        "User",
+        options=user_ids,
+        index=default_user_index,
+        help="Long-term facts are scoped to the selected user.",
     )
 
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("""
-    **Short-term**: Conversation history within the selected session.
-    Compressed via summarization when tokens exceed threshold.
+    with st.sidebar.popover("Add User"):
+        with st.form("add_user_form", clear_on_submit=True):
+            new_user_id = st.text_input("User ID")
+            submitted = st.form_submit_button("Create User")
+        if submitted and new_user_id.strip():
+            clean_user_id = new_user_id.strip()
+            _add_user_profile(memory_mgr, config.namespace, clean_user_id)
+            st.session_state["_selected_user_id"] = clean_user_id
+            st.session_state.pop("messages", None)
+            st.session_state.pop("summary", None)
+            st.rerun()
 
-    **Long-term**: Agent-driven memory tools (facts + spatial).
-    Persists across sessions, scoped to the selected user.
+    st.session_state.user_id = selected_user
 
-    **Forget**: Agent deletes matching memories directly.
-    """)
-
-    if st.sidebar.button("Clear Long-Term Memory"):
-        _clear_long_term_memory(config, st.session_state.user_id)
+    long_term_items = _list_long_term_memory_items(
+        memory_mgr, config.namespace, st.session_state.user_id
+    )
+    if st.sidebar.button(
+        "Delete User",
+        disabled=st.session_state.user_id == "default",
+    ):
+        _delete_user_long_term_memory(
+            memory_mgr, config.namespace, st.session_state.user_id
+        )
+        remaining_users = [
+            uid
+            for uid in _get_user_ids(memory_mgr, config.namespace)
+            if uid != st.session_state.user_id
+        ]
+        st.session_state["_selected_user_id"] = (
+            "default" if "default" in remaining_users else remaining_users[0]
+        )
+        st.session_state.pop("messages", None)
+        st.session_state.pop("summary", None)
         st.rerun()
+
+    if not long_term_items:
+        st.sidebar.info("No long-term memories for this user.")
+    else:
+        facts = [item for item in long_term_items if item[0] == "facts"]
+        spatial = [item for item in long_term_items if item[0] == "spatial"]
+        for label, group in (("Facts", facts), ("Locations", spatial)):
+            if not group:
+                continue
+            with st.sidebar.expander(f"{label} ({len(group)})", expanded=False):
+                for schema, ns, key, value in group:
+                    st.caption(_format_long_term_item(schema, key, value))
+                    if st.button(
+                        "Delete",
+                        key=f"delete_ltm_{schema}_{key}",
+                    ):
+                        memory_mgr.store.delete(ns, key)
+                        st.rerun()
+
+    st.sidebar.markdown("---")
 
     # --- Initialize agent graph ---
 
