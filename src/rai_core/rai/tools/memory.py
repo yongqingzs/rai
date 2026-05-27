@@ -21,13 +21,14 @@ Provides 4 tools:
 - ForgetMemoryTool: Delete matching stored memories
 """
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, Type
 
 from langchain_core.tools import BaseTool
 from langgraph.store.base import BaseStore
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # --- Tool Input Schemas ---
 
@@ -41,12 +42,19 @@ class SaveFactToolInput(BaseModel):
 class SaveLocationToolInput(BaseModel):
     """Input for saving structured spatial/location data."""
 
+    class PoseInput(BaseModel):
+        """2D/3D position for a stored location."""
+
+        x: float = Field(..., description="X coordinate in meters")
+        y: float = Field(..., description="Y coordinate in meters")
+        z: float = Field(..., description="Z coordinate in meters")
+
     location_name: str = Field(
         ..., description="Name of the location (e.g. 'Kitchen', 'Living Room')"
     )
-    pose: Optional[dict] = Field(
+    pose: Optional[PoseInput] = Field(
         default=None,
-        description="Optional pose as dict with x, y, z, and optionally roll, pitch, yaw",
+        description="Optional position with x, y, z coordinates",
     )
     objects: Optional[list[str]] = Field(
         default=None,
@@ -56,6 +64,33 @@ class SaveLocationToolInput(BaseModel):
         default=None,
         description="Optional natural language description of the location",
     )
+
+    @field_validator("pose", mode="before")
+    @classmethod
+    def parse_pose(cls, value):
+        if value is None or isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        return value
+
+
+def _normalize_pose(
+    pose: Optional[SaveLocationToolInput.PoseInput | dict | str],
+) -> Optional[dict]:
+    if pose is None:
+        return None
+    if isinstance(pose, SaveLocationToolInput.PoseInput):
+        return pose.model_dump()
+    if isinstance(pose, dict):
+        return pose
+    if isinstance(pose, str):
+        parsed = json.loads(pose)
+        if isinstance(parsed, dict):
+            return parsed
+    raise TypeError("pose must be a dict, PoseInput, JSON string, or None")
 
 
 class RecallMemoryToolInput(BaseModel):
@@ -159,28 +194,32 @@ def create_memory_tools(
         def _run(
             self,
             location_name: str,
-            pose: Optional[dict] = None,
+            pose: Optional[SaveLocationToolInput.PoseInput | dict | str] = None,
             objects: Optional[list[str]] = None,
             description: Optional[str] = None,
         ) -> str:
             key = f"loc_{location_name.lower().replace(' ', '_')}"
+            pose_data = _normalize_pose(pose)
             value = {
                 "location": location_name,
-                "pose": pose,
+                "pose": pose_data,
                 "objects": objects or [],
                 "description": description or "",
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
             store.put(spatial_ns, key, value)
             result = f"Location saved: '{location_name}'"
-            if pose:
-                result += f" at ({pose.get('x', '?')}, {pose.get('y', '?')}, {pose.get('z', '?')})"
+            if pose_data:
+                result += (
+                    f" at ({pose_data.get('x', '?')}, {pose_data.get('y', '?')}, "
+                    f"{pose_data.get('z', '?')})"
+                )
             return result
 
         def _arun(
             self,
             location_name: str,
-            pose: Optional[dict] = None,
+            pose: Optional[SaveLocationToolInput.PoseInput | dict | str] = None,
             objects: Optional[list[str]] = None,
             description: Optional[str] = None,
         ) -> str:

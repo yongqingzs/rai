@@ -71,7 +71,7 @@ You have access to memory tools:
 
 Use these tools proactively:
 - When the user shares preferences or important information, save them with save_fact
-- When you identify or learn about a location with coordinates, use save_location (pose must be a dict with keys x, y, z like: x=1.0, y=2.0, z=0.0)
+- When you identify or learn about a location with coordinates, use save_location with a pose like: {{"x": 1.0, "y": 2.0, "z": 0.0}}
 - When the user asks to forget something, use forget_memory"""
 
 
@@ -133,7 +133,10 @@ def _load_all_long_term_memories(
                     desc = item.value.get("description", "")
                     line = f"- {loc}"
                     if pose:
-                        line += f" ({pose.get('x', '?')}, {pose.get('y', '?')}, {pose.get('z', '?')})"
+                        line += (
+                            f" ({pose.get('x', '?')}, {pose.get('y', '?')}, "
+                            f"{pose.get('z', '?')})"
+                        )
                     if desc:
                         line += f" — {desc}"
                     if objects:
