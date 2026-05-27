@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from langgraph.store.memory import InMemoryStore
+from pydantic import ValidationError
 
 from rai.tools.memory import create_memory_tools
 
@@ -55,3 +56,49 @@ def test_save_location_accepts_structured_pose_and_json_string():
     )
     assert "Living Room" in recall_result
     assert '"x": -0.82' in recall_result
+
+
+def test_save_location_accepts_objects_as_json_string():
+    store = InMemoryStore()
+    tools = create_memory_tools(store=store, namespace="test", user_id="alice")
+
+    result_empty = tools["save_location"].invoke(
+        {
+            "location_name": "Toilet",
+            "pose": "{\"x\": 0, \"y\": 0, \"z\": 3.0}",
+            "objects": "[]",
+            "description": "The toilet located at the specified coordinates.",
+        }
+    )
+    assert "Toilet" in result_empty
+
+    result_objects = tools["save_location"].invoke(
+        {
+            "location_name": "Bathroom",
+            "objects": "[\"sink\", \"door\"]",
+        }
+    )
+    assert "Bathroom" in result_objects
+
+    recall_result = tools["recall"].invoke(
+        {"query": "Bathroom", "memory_type": "spatial"}
+    )
+    assert "Bathroom" in recall_result
+    assert "sink" in recall_result
+
+
+def test_save_location_rejects_objects_json_object():
+    store = InMemoryStore()
+    tools = create_memory_tools(store=store, namespace="test", user_id="alice")
+
+    try:
+        tools["save_location"].invoke(
+            {
+                "location_name": "Invalid",
+                "objects": "{\"name\": \"sink\"}",
+            }
+        )
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("Expected objects JSON object to fail validation")

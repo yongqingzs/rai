@@ -76,6 +76,19 @@ class SaveLocationToolInput(BaseModel):
                 return parsed
         return value
 
+    @field_validator("objects", mode="before")
+    @classmethod
+    def parse_objects(cls, value):
+        if value is None or isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            if not value.strip():
+                return []
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        return value
+
 
 def _normalize_pose(
     pose: Optional[SaveLocationToolInput.PoseInput | dict | str],
@@ -195,7 +208,7 @@ def create_memory_tools(
             self,
             location_name: str,
             pose: Optional[SaveLocationToolInput.PoseInput | dict | str] = None,
-            objects: Optional[list[str]] = None,
+            objects: Optional[list[str] | str] = None,
             description: Optional[str] = None,
         ) -> str:
             key = f"loc_{location_name.lower().replace(' ', '_')}"
@@ -220,7 +233,7 @@ def create_memory_tools(
             self,
             location_name: str,
             pose: Optional[SaveLocationToolInput.PoseInput | dict | str] = None,
-            objects: Optional[list[str]] = None,
+            objects: Optional[list[str] | str] = None,
             description: Optional[str] = None,
         ) -> str:
             return self._run(location_name, pose, objects, description)
