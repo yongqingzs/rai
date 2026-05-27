@@ -30,7 +30,10 @@ import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from rai import get_embeddings_model, get_llm_model
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
-from rai.frontend.memory_streamlit import render_memory_sidebar
+from rai.frontend.memory_streamlit import (
+    render_chat_messages_with_tools,
+    render_memory_sidebar,
+)
 from rai.memory import (
     MemoryAgentContext,
     MemoryManager,
@@ -231,11 +234,7 @@ def run_memory_app():
 
     # --- Render messages ---
 
-    for msg in sidebar_state.messages:
-        if isinstance(msg, AIMessage) and msg.content:
-            st.chat_message("assistant").write(msg.content)
-        elif isinstance(msg, HumanMessage):
-            st.chat_message("user").write(msg.content)
+    render_chat_messages_with_tools(sidebar_state.messages)
 
     # Render tool calls in sidebar
     st.sidebar.header("Tool Calls")
@@ -278,6 +277,7 @@ def run_memory_app():
             # Replace UI messages with the checkpointed thread state.
             st.session_state.messages = result["messages"]
             st.session_state["summary"] = result.get("summary", "")
+            st.rerun()
 
 
 if __name__ == "__main__":

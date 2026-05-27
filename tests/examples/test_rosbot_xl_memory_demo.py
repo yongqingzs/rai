@@ -15,9 +15,10 @@
 import importlib.util
 from pathlib import Path
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.store.memory import InMemoryStore
 
+from rai.frontend.memory_streamlit import collect_tool_call_entries
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.session import delete_session, get_latest_session_id, load_thread_state
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
@@ -86,6 +87,32 @@ def test_welcome_message_is_ai_message():
 
     assert isinstance(message, AIMessage)
     assert "persistent memory" in message.content
+
+
+def test_collect_tool_call_entries_matches_outputs():
+    ai_message = AIMessage(
+        content="",
+        id="ai-1",
+        tool_calls=[
+            {
+                "id": "call-1",
+                "name": "save_location",
+                "args": {"location_name": "Kitchen"},
+            }
+        ],
+    )
+    tool_message = ToolMessage(
+        content="Location saved: 'Kitchen'",
+        name="save_location",
+        tool_call_id="call-1",
+    )
+
+    entries = collect_tool_call_entries([ai_message, tool_message])
+
+    assert list(entries) == ["ai-1"]
+    assert entries["ai-1"][0].name == "save_location"
+    assert entries["ai-1"][0].args == {"location_name": "Kitchen"}
+    assert entries["ai-1"][0].output == tool_message
 
 
 def test_delete_session_deletes_checkpoint_thread():

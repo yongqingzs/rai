@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import streamlit as st
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.manager import MemoryManager
@@ -38,8 +39,81 @@ class MemorySidebarState:
     summary: str
 
 
+@dataclass
+class ToolCallRenderEntry:
+    tool_call_id: str
+    name: str
+    args: Any
+    output: ToolMessage | None = None
+
+
 def default_welcome_message() -> AIMessage:
     return AIMessage(content="New conversation started.")
+
+
+def collect_tool_call_entries(messages: list) -> dict[str, list[ToolCallRenderEntry]]:
+    """Group persisted tool calls with their matching ToolMessage outputs."""
+    outputs_by_id = {
+        msg.tool_call_id: msg for msg in messages if isinstance(msg, ToolMessage)
+    }
+    entries_by_ai_message_id = {}
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, AIMessage) or not msg.tool_calls:
+            continue
+
+        message_id = msg.id or f"ai-message-{index}"
+        entries_by_ai_message_id[message_id] = [
+            ToolCallRenderEntry(
+                tool_call_id=tool_call.get("id", ""),
+                name=tool_call.get("name", "tool"),
+                args=tool_call.get("args", {}),
+                output=outputs_by_id.get(tool_call.get("id", "")),
+            )
+            for tool_call in msg.tool_calls
+        ]
+    return entries_by_ai_message_id
+
+
+def _format_tool_args(args: Any) -> str:
+    if isinstance(args, str):
+        return args
+    return json.dumps(args, indent=2, ensure_ascii=False)
+
+
+def render_chat_messages_with_tools(messages: list):
+    """Render checkpointed chat messages, including recoverable tool call details."""
+    tool_entries = collect_tool_call_entries(messages)
+    for index, msg in enumerate(messages):
+        if isinstance(msg, HumanMessage):
+            st.chat_message("user").write(msg.content)
+            continue
+
+        if isinstance(msg, AIMessage):
+            message_id = msg.id or f"ai-message-{index}"
+            entries = tool_entries.get(message_id, [])
+            if msg.content or entries:
+                with st.chat_message("assistant"):
+                    if msg.content:
+                        st.write(msg.content)
+                    for entry in entries:
+                        with st.expander(f"Tool: {entry.name}", expanded=False):
+                            st.caption("Input")
+                            st.code(_format_tool_args(entry.args), language="json")
+                            if entry.output is not None:
+                                st.caption("Output")
+                                st.code(entry.output.content, language="json")
+            continue
+
+        if isinstance(msg, ToolMessage):
+            if msg.tool_call_id not in {
+                entry.tool_call_id
+                for entries in tool_entries.values()
+                for entry in entries
+            }:
+                with st.chat_message("assistant"):
+                    with st.expander(f"Tool: {msg.name}", expanded=False):
+                        st.caption("Output")
+                        st.code(msg.content, language="json")
 
 
 def render_memory_sidebar(
