@@ -18,6 +18,10 @@ from pathlib import Path
 from langchain_core.messages import AIMessage
 from langgraph.store.memory import InMemoryStore
 
+from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
+from rai.memory.session import delete_session, get_latest_session_id, load_thread_state
+from rai.memory.users import add_user_profile, delete_user, get_user_ids
+
 
 def _load_demo_module():
     path = Path(__file__).parents[2] / "examples" / "rosbot-xl-memory-demo.py"
@@ -66,11 +70,10 @@ class _MemoryManager:
 
 
 def test_load_thread_state_reads_checkpoint_values():
-    demo = _load_demo_module()
     messages = [AIMessage(content="restored")]
     graph = _Graph({"messages": messages, "summary": "prior summary"})
 
-    restored_messages, restored_summary = demo._load_thread_state(graph, "thread-1")
+    restored_messages, restored_summary = load_thread_state(graph, "thread-1")
 
     assert restored_messages == messages
     assert restored_summary == "prior summary"
@@ -86,36 +89,32 @@ def test_welcome_message_is_ai_message():
 
 
 def test_delete_session_deletes_checkpoint_thread():
-    demo = _load_demo_module()
     memory_mgr = _MemoryManager()
 
-    demo._delete_session(memory_mgr, "thread-1")
+    delete_session(memory_mgr, "thread-1")
 
     assert memory_mgr.checkpointer.deleted == ["thread-1"]
 
 
 def test_get_latest_session_id_uses_first_checkpoint():
-    demo = _load_demo_module()
     memory_mgr = _MemoryManager()
 
-    assert demo._get_latest_session_id(memory_mgr) == "latest"
+    assert get_latest_session_id(memory_mgr) == "latest"
 
 
 def test_get_user_ids_merges_profiles_and_memory_namespaces():
-    demo = _load_demo_module()
     memory_mgr = _MemoryManager()
-    demo._add_user_profile(memory_mgr, "default", "bob")
+    add_user_profile(memory_mgr, "default", "bob")
     memory_mgr.store.put(
         ("default", "alice", "facts"),
         "fact-1",
         {"text": "The user likes green tea."},
     )
 
-    assert demo._get_user_ids(memory_mgr, "default") == ["alice", "bob", "default"]
+    assert get_user_ids(memory_mgr, "default") == ["alice", "bob", "default"]
 
 
 def test_list_and_format_long_term_memory_items():
-    demo = _load_demo_module()
     memory_mgr = _MemoryManager()
     memory_mgr.store.put(
         ("default", "alice", "facts"),
@@ -128,8 +127,8 @@ def test_list_and_format_long_term_memory_items():
         {"location": "Kitchen", "pose": {"x": 1.0, "y": 2.0, "z": 0.0}},
     )
 
-    items = demo._list_long_term_memory_items(memory_mgr, "default", "alice")
-    formatted = [demo._format_long_term_item(*item[:1], item[2], item[3]) for item in items]
+    items = list_long_term_memory_items(memory_mgr.store, "default", "alice")
+    formatted = [format_long_term_item(*item[:1], item[2], item[3]) for item in items]
 
     assert len(items) == 2
     assert "The user likes green tea." in formatted
@@ -137,9 +136,8 @@ def test_list_and_format_long_term_memory_items():
 
 
 def test_delete_user_long_term_memory_deletes_all_user_items():
-    demo = _load_demo_module()
     memory_mgr = _MemoryManager()
-    demo._add_user_profile(memory_mgr, "default", "alice")
+    add_user_profile(memory_mgr, "default", "alice")
     memory_mgr.store.put(
         ("default", "alice", "facts"),
         "fact-1",
@@ -151,23 +149,22 @@ def test_delete_user_long_term_memory_deletes_all_user_items():
         {"location": "Kitchen", "pose": {"x": 1.0, "y": 2.0, "z": 0.0}},
     )
 
-    deleted = demo._delete_user_long_term_memory(memory_mgr, "default", "alice")
+    deleted = delete_user(memory_mgr, "default", "alice")
 
     assert deleted == 3
-    assert demo._list_long_term_memory_items(memory_mgr, "default", "alice") == []
-    assert "alice" not in demo._get_user_ids(memory_mgr, "default")
+    assert list_long_term_memory_items(memory_mgr.store, "default", "alice") == []
+    assert "alice" not in get_user_ids(memory_mgr, "default")
 
 
 def test_deleted_user_profile_hides_stale_namespaces():
-    demo = _load_demo_module()
     memory_mgr = _MemoryManager()
-    demo._add_user_profile(memory_mgr, "default", "robot_user")
+    add_user_profile(memory_mgr, "default", "robot_user")
     memory_mgr.store.put(
         ("default", "robot_user", "facts"),
         "fact-1",
         {"text": "temporary memory"},
     )
-    demo._delete_user_long_term_memory(memory_mgr, "default", "robot_user")
+    delete_user(memory_mgr, "default", "robot_user")
 
     # Simulate a store backend that still reports the old namespace after deletion.
     memory_mgr.store.put(
@@ -176,11 +173,10 @@ def test_deleted_user_profile_hides_stale_namespaces():
         {"text": "stale namespace marker"},
     )
 
-    assert "robot_user" not in demo._get_user_ids(memory_mgr, "default")
+    assert "robot_user" not in get_user_ids(memory_mgr, "default")
 
 
 def test_delete_legacy_user_without_profile_hides_namespace_user():
-    demo = _load_demo_module()
     memory_mgr = _MemoryManager()
     memory_mgr.store.put(
         ("default", "robot_user", "facts"),
@@ -188,7 +184,7 @@ def test_delete_legacy_user_without_profile_hides_namespace_user():
         {"text": "legacy memory"},
     )
 
-    deleted = demo._delete_user_long_term_memory(memory_mgr, "default", "robot_user")
+    deleted = delete_user(memory_mgr, "default", "robot_user")
 
     assert deleted == 2
-    assert "robot_user" not in demo._get_user_ids(memory_mgr, "default")
+    assert "robot_user" not in get_user_ids(memory_mgr, "default")
