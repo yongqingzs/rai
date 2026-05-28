@@ -14,7 +14,6 @@
 
 from langgraph.store.memory import InMemoryStore
 from pydantic import ValidationError
-
 from rai.tools.memory import create_memory_tools
 
 
@@ -46,7 +45,7 @@ def test_save_location_accepts_structured_pose_and_json_string():
     result_json = tools["save_location"].invoke(
         {
             "location_name": "Living Room",
-            "pose": "{\"x\": -0.82, \"y\": 3.525, \"z\": 0.0}",
+            "pose": '{"x": -0.82, "y": 3.525, "z": 0.0}',
         }
     )
     assert "Living Room" in result_json
@@ -65,7 +64,7 @@ def test_save_location_accepts_objects_as_json_string():
     result_empty = tools["save_location"].invoke(
         {
             "location_name": "Toilet",
-            "pose": "{\"x\": 0, \"y\": 0, \"z\": 3.0}",
+            "pose": '{"x": 0, "y": 0, "z": 3.0}',
             "objects": "[]",
             "description": "The toilet located at the specified coordinates.",
         }
@@ -75,7 +74,7 @@ def test_save_location_accepts_objects_as_json_string():
     result_objects = tools["save_location"].invoke(
         {
             "location_name": "Bathroom",
-            "objects": "[\"sink\", \"door\"]",
+            "objects": '["sink", "door"]',
         }
     )
     assert "Bathroom" in result_objects
@@ -95,7 +94,7 @@ def test_save_location_rejects_objects_json_object():
         tools["save_location"].invoke(
             {
                 "location_name": "Invalid",
-                "objects": "{\"name\": \"sink\"}",
+                "objects": '{"name": "sink"}',
             }
         )
     except ValidationError:

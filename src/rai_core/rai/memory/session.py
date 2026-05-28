@@ -29,9 +29,7 @@ def get_session_ids(memory_mgr: MemoryManager, limit: int = 200) -> List[str]:
     return sorted(thread_ids)
 
 
-def get_latest_session_id(
-    memory_mgr: MemoryManager, limit: int = 200
-) -> Optional[str]:
+def get_latest_session_id(memory_mgr: MemoryManager, limit: int = 200) -> Optional[str]:
     """Get the latest thread ID reported by the checkpointer."""
     for checkpoint in memory_mgr.checkpointer.list(None, limit=limit):
         thread_id = checkpoint.config.get("configurable", {}).get("thread_id")

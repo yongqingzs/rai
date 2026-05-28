@@ -16,6 +16,7 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
+import rai.agents.langchain.core.react_agent as react_agent
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import (
@@ -28,8 +29,6 @@ from langchain_core.messages import (
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import Field
-
-import rai.agents.langchain.core.react_agent as react_agent
 from rai.agents.langchain.core.react_agent import summarize_messages
 from rai.frontend.memory_streamlit import collect_tool_call_entries
 from rai.memory.graph import MemoryAgentContext, create_memory_react_agent
