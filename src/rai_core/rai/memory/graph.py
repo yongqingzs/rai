@@ -56,6 +56,17 @@ class MemoryState(TypedDict):
 SystemPromptBuilder = Callable[[MemoryAgentContext], str]
 
 
+def _inject_summary(system_prompt: str, summary: str) -> str:
+    if not summary:
+        return system_prompt
+    return (
+        f"{system_prompt}\n\n"
+        "## Short-Term Memory Summary\n"
+        "The following is an internal summary of earlier conversation in this "
+        f"thread. Use it as context, not as a literal assistant message.\n{summary}"
+    )
+
+
 def create_memory_react_agent(
     memory_mgr: MemoryManager,
     llm: BaseChatModel,
@@ -114,11 +125,15 @@ def create_memory_react_agent(
     ):
         configurable = config.get("configurable", {})
         try:
+            system_prompt = _inject_summary(
+                state["system_prompt"],
+                state.get("summary", ""),
+            )
             conversation_messages = [
                 m for m in state["messages"] if not isinstance(m, SystemMessage)
             ]
             react_messages = [
-                SystemMessage(content=state["system_prompt"]),
+                SystemMessage(content=system_prompt),
                 *conversation_messages,
             ]
             result = inner_agent.invoke(

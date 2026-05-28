@@ -14,11 +14,25 @@
 
 import importlib.util
 from pathlib import Path
+from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
+from pydantic import Field
 
+import rai.agents.langchain.core.react_agent as react_agent
+from rai.agents.langchain.core.react_agent import summarize_messages
 from rai.frontend.memory_streamlit import collect_tool_call_entries
+from rai.memory.graph import MemoryAgentContext, create_memory_react_agent
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.session import delete_session, get_latest_session_id, load_thread_state
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
@@ -70,6 +84,39 @@ class _MemoryManager:
         self.store = InMemoryStore()
 
 
+class _GraphMemoryManager:
+    def __init__(self):
+        self.checkpointer = InMemorySaver()
+        self.store = InMemoryStore()
+
+
+class _RecordingFakeChatModel(FakeListChatModel):
+    calls: list[list[BaseMessage]] = Field(default_factory=list)
+
+    def _call(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> str:
+        self.calls.append(list(messages))
+        return super()._call(
+            messages,
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
+
+
+def _has_conversation_summary_message(messages: list[BaseMessage]) -> bool:
+    return any(
+        isinstance(message.content, str)
+        and message.content.startswith("[Conversation summary:")
+        for message in messages
+    )
+
+
 def test_load_thread_state_reads_checkpoint_values():
     messages = [AIMessage(content="restored")]
     graph = _Graph({"messages": messages, "summary": "prior summary"})
@@ -87,6 +134,65 @@ def test_welcome_message_is_ai_message():
 
     assert isinstance(message, AIMessage)
     assert "persistent memory" in message.content
+
+
+def test_short_term_summary_is_state_not_message():
+    messages = []
+    for i in range(8):
+        messages.append(HumanMessage(content=f"user turn {i} " + "x" * 120))
+        messages.append(AIMessage(content=f"assistant turn {i} " + "y" * 120))
+
+    result = summarize_messages(
+        messages,
+        existing_summary="previous summary",
+        llm=FakeListChatModel(responses=["compressed summary"]),
+        threshold=100,
+        keep_recent=4,
+    )
+
+    assert result["summary"] == "compressed summary"
+    assert result["messages"] == messages[-4:]
+    assert not _has_conversation_summary_message(result["messages"])
+
+
+def test_memory_graph_injects_summary_without_checkpointing_summary_message(
+    monkeypatch,
+):
+    summaries = iter([f"summary {i}" for i in range(20)])
+    monkeypatch.setattr(
+        react_agent,
+        "get_llm_model",
+        lambda *args, **kwargs: FakeListChatModel(responses=[next(summaries)]),
+    )
+    llm = _RecordingFakeChatModel(responses=[f"answer {i}" for i in range(20)])
+    memory_mgr = _GraphMemoryManager()
+    graph = create_memory_react_agent(
+        memory_mgr=memory_mgr,
+        llm=llm,
+        tools=[],
+        system_prompt_builder=lambda context: "base system prompt",
+        token_threshold=120,
+        keep_recent=4,
+    )
+    config = {"configurable": {"thread_id": "short-term-summary"}}
+    context = MemoryAgentContext(user_id="alice", namespace="default")
+
+    for i in range(8):
+        graph.invoke(
+            {"messages": [HumanMessage(content=f"user turn {i} " + "x" * 140)]},
+            config=config,
+            context=context,
+        )
+
+    snapshot = graph.get_state(config)
+    checkpoint_messages = snapshot.values["messages"]
+
+    assert snapshot.values["summary"]
+    assert not _has_conversation_summary_message(checkpoint_messages)
+    assert len(checkpoint_messages) < 16
+    assert isinstance(llm.calls[-1][0], SystemMessage)
+    assert "## Short-Term Memory Summary" in llm.calls[-1][0].content
+    assert snapshot.values["summary"] in llm.calls[-1][0].content
 
 
 def test_collect_tool_call_entries_matches_outputs():

@@ -247,10 +247,8 @@ def summarize_messages(
     )
     new_summary = summary_response.content
 
-    # Rebuild message list: system + summary as AI message + recent
-    from langchain_core.messages import AIMessage
-
-    summary_msg = AIMessage(content=f"[Conversation summary: {new_summary}]")
-    compressed = system_msgs + [summary_msg] + recent
+    # Rebuild message list with only real recent messages. The summary is returned
+    # separately so callers can keep it as state instead of conversation history.
+    compressed = system_msgs + recent
 
     return {"messages": compressed, "summary": new_summary}
