@@ -26,7 +26,7 @@ from .react_agent import (
 )
 from .state_based_agent import create_state_based_runnable
 from .structured_output_agent import create_structured_output_runnable
-from .tool_runner import SubAgentToolRunner, ToolRunner
+from .tool_runner import SubAgentToolRunner, ToolCallGuard, ToolPolicy, ToolRunner
 
 __all__ = [
     "ContextProvider",
@@ -34,6 +34,8 @@ __all__ = [
     "Executor",
     "ReActAgentState",
     "SubAgentToolRunner",
+    "ToolCallGuard",
+    "ToolPolicy",
     "ToolRunner",
     "create_conversational_agent",
     "create_megamind",

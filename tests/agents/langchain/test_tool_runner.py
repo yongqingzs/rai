@@ -16,7 +16,7 @@ import logging
 
 from langchain_core.messages import AIMessage, ToolCall, ToolMessage
 from langchain_core.tools import tool
-from rai.agents.langchain.core import ToolRunner
+from rai.agents.langchain.core import ToolCallGuard, ToolPolicy, ToolRunner
 from rai.messages import HumanMultimodalMessage, ToolMultimodalMessage, preprocess_image
 from rai.tools.ros2.cli import ros2_topic
 
@@ -78,3 +78,135 @@ def test_tool_runner_multimodal():
     assert isinstance(output["messages"][2], HumanMultimodalMessage), (
         "Human output is not a multimodal message"
     )
+
+
+@tool
+def echo_tool(value: str) -> str:
+    """Echo a value."""
+    return value
+
+
+@tool
+def query_robot_docs(query: str) -> str:
+    """Search robot docs."""
+    return f"docs: {query}"
+
+
+@tool
+def save_fact(fact: str) -> str:
+    """Save a fact."""
+    return f"saved: {fact}"
+
+
+def test_tool_runner_blocks_default_excessive_same_tool_calls():
+    guard = ToolCallGuard(
+        max_total_calls_per_turn=8,
+        default_policy=ToolPolicy(max_calls_per_turn=1),
+    )
+    runner = ToolRunner(tools=[echo_tool], tool_call_guard=guard)
+    first_call = ToolCall(name="echo_tool", args={"value": "first"}, id="1")
+    second_call = ToolCall(name="echo_tool", args={"value": "second"}, id="2")
+    state = {
+        "messages": [
+            AIMessage(content="", tool_calls=[first_call]),
+            ToolMessage(content="first", name="echo_tool", tool_call_id="1"),
+            AIMessage(content="", tool_calls=[second_call]),
+        ]
+    }
+
+    output = runner.invoke(state)
+
+    assert output["messages"][-1].status == "error"
+    assert "already called 1 time" in output["messages"][-1].content
+
+
+def test_tool_runner_blocks_similar_robot_docs_queries():
+    runner = ToolRunner(tools=[query_robot_docs, echo_tool])
+    first_call = ToolCall(
+        name="query_robot_docs",
+        args={"query": "weight mass dimensions"},
+        id="1",
+    )
+    echo_call = ToolCall(name="echo_tool", args={"value": "step"}, id="2")
+    second_call = ToolCall(
+        name="query_robot_docs",
+        args={"query": "chassis size weight kg dimensions"},
+        id="3",
+    )
+    state = {
+        "messages": [
+            AIMessage(content="", tool_calls=[first_call]),
+            ToolMessage(
+                content="Result 1\nContent:\ncamera size only",
+                name="query_robot_docs",
+                tool_call_id="1",
+            ),
+            AIMessage(content="", tool_calls=[echo_call]),
+            ToolMessage(content="step", name="echo_tool", tool_call_id="2"),
+            AIMessage(content="", tool_calls=[second_call]),
+        ]
+    }
+
+    output = runner.invoke(state)
+
+    assert output["messages"][-1].status == "error"
+    assert "similar arguments" in output["messages"][-1].content
+
+
+def test_tool_runner_allows_distinct_robot_docs_queries_after_other_tool():
+    runner = ToolRunner(tools=[query_robot_docs, echo_tool])
+    docs_call = ToolCall(
+        name="query_robot_docs",
+        args={"query": "camera parameters"},
+        id="1",
+    )
+    echo_call = ToolCall(name="echo_tool", args={"value": "step"}, id="2")
+    second_docs_call = ToolCall(
+        name="query_robot_docs",
+        args={"query": "operating limits"},
+        id="3",
+    )
+    state = {
+        "messages": [
+            AIMessage(content="", tool_calls=[docs_call]),
+            ToolMessage(
+                content="camera docs",
+                name="query_robot_docs",
+                tool_call_id="1",
+            ),
+            AIMessage(content="", tool_calls=[echo_call]),
+            ToolMessage(content="step", name="echo_tool", tool_call_id="2"),
+            AIMessage(content="", tool_calls=[second_docs_call]),
+        ]
+    }
+
+    output = runner.invoke(state)
+
+    assert output["messages"][-1].status == "success"
+    assert output["messages"][-1].content == "docs: operating limits"
+
+
+def test_tool_runner_blocks_similar_memory_save_fact_calls():
+    runner = ToolRunner(tools=[save_fact])
+    first_call = ToolCall(
+        name="save_fact",
+        args={"fact": "The user likes green tea."},
+        id="1",
+    )
+    second_call = ToolCall(
+        name="save_fact",
+        args={"fact": "User likes green tea"},
+        id="2",
+    )
+    state = {
+        "messages": [
+            AIMessage(content="", tool_calls=[first_call]),
+            ToolMessage(content="saved", name="save_fact", tool_call_id="1"),
+            AIMessage(content="", tool_calls=[second_call]),
+        ]
+    }
+
+    output = runner.invoke(state)
+
+    assert output["messages"][-1].status == "error"
+    assert "similar arguments" in output["messages"][-1].content
