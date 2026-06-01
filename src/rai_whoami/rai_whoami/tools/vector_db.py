@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal, Type
 
 from langchain_community.vectorstores import VectorStore
+from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -25,6 +26,28 @@ from rai_whoami.vector_db.faiss import get_faiss_client
 
 class QueryDatabaseToolInput(BaseModel):
     query: str = Field(..., description="The query to search the database with")
+
+
+def _format_metadata_value(value: Any) -> str:
+    if value is None or value == "":
+        return "unknown"
+    return str(value)
+
+
+def format_retrieved_documents(documents: list[Document]) -> str:
+    if len(documents) == 0:
+        return "No matching documents found."
+
+    formatted: list[str] = []
+    for index, document in enumerate(documents, start=1):
+        metadata = document.metadata or {}
+        source = _format_metadata_value(metadata.get("source"))
+        page = _format_metadata_value(metadata.get("page"))
+        content = document.page_content.strip()
+        formatted.append(
+            f"Result {index}\nSource: {source}\nPage: {page}\nContent:\n{content}"
+        )
+    return "\n\n".join(formatted)
 
 
 class QueryDatabaseTool(BaseTool):
@@ -51,4 +74,5 @@ class QueryDatabaseTool(BaseTool):
             raise ValueError(f"Unsupported database type: {self.database_type}")
 
     def _run(self, query: str) -> str:
-        return str(self.vdb_client.similarity_search(query, k=self.k))
+        documents = self.vdb_client.similarity_search(query, k=self.k)
+        return format_retrieved_documents(documents)

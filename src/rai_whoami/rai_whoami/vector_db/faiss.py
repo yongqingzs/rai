@@ -20,11 +20,67 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, cast
 
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 from rai.initialization import get_embeddings_model
 
 from rai_whoami.models import EmbodimentSource
 from rai_whoami.vector_db.builder import VectorDBBuilder
+
+DEFAULT_CHUNK_SIZE = 1000
+DEFAULT_CHUNK_OVERLAP = 150
+MARKDOWN_HEADERS_TO_SPLIT_ON = [
+    ("#", "Header 1"),
+    ("##", "Header 2"),
+    ("###", "Header 3"),
+    ("####", "Header 4"),
+]
+
+
+def _is_markdown_document(document: Document) -> bool:
+    source = str(document.metadata.get("source", "")).lower()
+    return source.endswith(".md") or source.endswith(".markdown")
+
+
+def split_documents_for_vector_db(
+    documents: list[Document],
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+) -> list[Document]:
+    """Split loaded documentation into chunks suitable for vector search."""
+    recursive_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+    markdown_splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=MARKDOWN_HEADERS_TO_SPLIT_ON,
+        strip_headers=False,
+    )
+
+    chunks: list[Document] = []
+    for document in documents:
+        if _is_markdown_document(document):
+            markdown_chunks = markdown_splitter.split_text(document.page_content)
+            for markdown_chunk in markdown_chunks:
+                markdown_chunk.metadata = {
+                    **document.metadata,
+                    **markdown_chunk.metadata,
+                }
+            split_chunks = recursive_splitter.split_documents(markdown_chunks)
+        else:
+            split_chunks = recursive_splitter.split_documents([document])
+
+        for index, chunk in enumerate(split_chunks):
+            chunk.metadata = {
+                **chunk.metadata,
+                "chunk_index": index,
+            }
+        chunks.extend(split_chunks)
+    return [chunk for chunk in chunks if chunk.page_content.strip()]
 
 
 class FAISSBuilder(VectorDBBuilder):
@@ -33,8 +89,12 @@ class FAISSBuilder(VectorDBBuilder):
         root_dir: str = "faiss/",
         embedding: Optional[Embeddings] = None,
         model_kwargs: Optional[Dict[str, Any]] = None,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
     ):
         self.root_dir = Path(root_dir)
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
         if embedding is None:
             embedding, model_kwargs = cast(
                 Tuple[Embeddings, Dict[str, Any]],
@@ -48,10 +108,25 @@ class FAISSBuilder(VectorDBBuilder):
         if len(data.documentation) == 0:
             raise ValueError("No documents found")
         os.makedirs(self.root_dir, exist_ok=True)
-        db = FAISS.from_documents(data.documentation, self.embedding)
+        documents = split_documents_for_vector_db(
+            data.documentation,
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+        )
+        if len(documents) == 0:
+            raise ValueError("No document chunks found")
+        db = FAISS.from_documents(documents, self.embedding)
         db.save_local(self.root_dir.as_posix())
         c = str(db.__class__).strip("<>").replace("class '", "").replace("'", "")
-        new_kwargs = {"vectorstore": {"class": c}, "embeddings": self.model_kwargs}
+        new_kwargs = {
+            "vectorstore": {"class": c},
+            "embeddings": self.model_kwargs,
+            "chunking": {
+                "chunk_size": self.chunk_size,
+                "chunk_overlap": self.chunk_overlap,
+                "markdown_headers": MARKDOWN_HEADERS_TO_SPLIT_ON,
+            },
+        }
         self.model_kwargs = new_kwargs
         self.dump_model_kwargs()
         return db
