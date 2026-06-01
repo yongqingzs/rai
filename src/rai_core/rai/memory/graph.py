@@ -36,6 +36,7 @@ from rai.agents.langchain.core.react_agent import (
     summarize_messages,
 )
 from rai.memory.manager import MemoryManager
+from rai.messages import HumanMultimodalMessage
 
 
 @dataclass
@@ -46,7 +47,14 @@ class MemoryAgentContext:
 
 class MemoryState(TypedDict):
     messages: Annotated[
-        List[AIMessage | HumanMessage | ToolMessage | SystemMessage | RemoveMessage],
+        List[
+            AIMessage
+            | HumanMessage
+            | HumanMultimodalMessage
+            | ToolMessage
+            | SystemMessage
+            | RemoveMessage
+        ],
         add_messages,
     ]
     summary: str

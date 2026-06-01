@@ -31,6 +31,7 @@ from rai.memory.session import (
     load_thread_state,
 )
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
+from rai.messages import HumanMultimodalMessage
 
 
 @dataclass
@@ -86,6 +87,9 @@ def render_chat_messages_with_tools(messages: list):
     """Render checkpointed chat messages, including recoverable tool call details."""
     tool_entries = collect_tool_call_entries(messages)
     for index, msg in enumerate(messages):
+        if isinstance(msg, HumanMultimodalMessage):
+            continue
+
         if isinstance(msg, HumanMessage):
             st.chat_message("user").write(msg.content)
             continue

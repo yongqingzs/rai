@@ -238,16 +238,23 @@ def test_build_memory_agent_includes_robot_docs_tool(monkeypatch, tmp_path):
     memory_mgr = _MemoryManager()
     captured = {}
 
-    class _Tool(BaseTool):
+    class _RobotDocsTool(BaseTool):
         name: str = "query_robot_docs"
         description: str = "robot docs"
 
         def _run(self):
             return "robot docs"
 
+    class _RobotTool(BaseTool):
+        name: str = "get_ros2_robot_position"
+        description: str = "robot position"
+
+        def _run(self):
+            return "robot position"
+
     monkeypatch.setattr(demo, "get_llm_model", lambda *args, **kwargs: object())
     monkeypatch.setattr(demo, "_load_embodiment", lambda path: "embodiment")
-    monkeypatch.setattr(demo, "create_robot_docs_tool", lambda *args: _Tool())
+    monkeypatch.setattr(demo, "create_robot_docs_tool", lambda *args: _RobotDocsTool())
 
     def _create_agent(**kwargs):
         captured.update(kwargs)
@@ -260,11 +267,16 @@ def test_build_memory_agent_includes_robot_docs_tool(monkeypatch, tmp_path):
         tmp_path / "embodiment.json",
         robot_docs_config=WhoamiConfig(enabled=True, root_dir="whoami"),
         embeddings_model=object(),
+        robot_tools=[_RobotTool()],
     )
 
     assert graph == "graph"
+    assert "get_ros2_robot_position" in [tool.name for tool in captured["base_tools"]]
     assert "query_robot_docs" in [tool.name for tool in captured["extra_tools"]]
-    assert captured["extra_prompt_sections"] == [demo.ROBOT_DOCS_PROMPT_SECTION]
+    assert captured["extra_prompt_sections"] == [
+        demo.ROSBOT_TOOLS_PROMPT_SECTION,
+        demo.ROBOT_DOCS_PROMPT_SECTION,
+    ]
 
 
 def test_short_term_summary_is_state_not_message():

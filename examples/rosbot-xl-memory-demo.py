@@ -25,10 +25,14 @@ Usage:
 
 import json
 from pathlib import Path
+from typing import Sequence
 
+import rclpy
 import streamlit as st
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import BaseTool
 from rai import get_embeddings_model, get_llm_model
+from rai.communication.ros2 import ROS2Connector
 from rai.frontend.memory_streamlit import (
     render_chat_messages_with_tools,
     render_memory_chat_input,
@@ -38,6 +42,14 @@ from rai.memory import (
     MemoryManager,
     create_memory_agent_with_tools,
     load_memory_config,
+)
+from rai.tools.ros2 import (
+    GetROS2ImageConfiguredTool,
+    GetROS2TransformConfiguredTool,
+)
+from rai.tools.ros2.navigation.nav2_blocking import (
+    GetCurrentPoseTool,
+    NavigateToPoseBlockingTool,
 )
 from rai.tools.time import WaitForSecondsTool
 
@@ -54,6 +66,11 @@ BASE_SYSTEM_PROMPT_TEMPLATE = """You are a ROSBot XL robot assistant. You can mo
 
 ROBOT_DOCS_PROMPT_SECTION = """## Robot Documentation Retrieval
 If the query_robot_docs tool is available, use it for questions about the robot's static documentation: hardware specifications, sensors, capabilities, URDF details, manuals, or operating limits. Do not use it for user preferences, learned facts, remembered locations, or conversation memory."""
+
+ROSBOT_TOOLS_PROMPT_SECTION = """## Robot Runtime Tools
+You can use ROSBot XL runtime tools to get the robot transform or current navigation pose, read the current camera image, navigate to a target pose in the map frame, and wait for a specified duration.
+
+This demo does not include rai_perception object-position tools. If a task requires detecting or locating arbitrary objects, explain that limitation or ask for explicit coordinates."""
 
 
 def _load_embodiment(path: Path) -> str:
@@ -78,6 +95,38 @@ def _load_embodiment(path: Path) -> str:
         return f"(Error loading embodiment: {e})"
 
 
+@st.cache_resource
+def initialize_rosbot_tools() -> list[BaseTool]:
+    """Initialize ROS 2 connector and return ROSBot runtime tools."""
+    if not rclpy.ok():
+        rclpy.init()
+
+    connector = ROS2Connector(executor_type="multi_threaded", use_sim_time=True)
+    return [
+        GetROS2TransformConfiguredTool(
+            connector=connector,
+            source_frame="map",
+            target_frame="base_link",
+            timeout_sec=5.0,
+        ),
+        GetROS2ImageConfiguredTool(
+            connector=connector,
+            topic="/camera/camera/color/image_raw",
+        ),
+        WaitForSecondsTool(),
+        NavigateToPoseBlockingTool(
+            connector=connector,
+            frame_id="map",
+            action_name="navigate_to_pose",
+        ),
+        GetCurrentPoseTool(
+            connector=connector,
+            frame_id="map",
+            robot_frame_id="base_link",
+        ),
+    ]
+
+
 def build_memory_agent(
     memory_mgr: MemoryManager,
     embodiment_path: Path,
@@ -85,6 +134,7 @@ def build_memory_agent(
     namespace: str = "default",
     robot_docs_config: WhoamiConfig | None = None,
     embeddings_model=None,
+    robot_tools: Sequence[BaseTool] | None = None,
 ) -> object:
     """Build a memory-aware agent graph.
 
@@ -102,9 +152,16 @@ def build_memory_agent(
     embodiment_text = _load_embodiment(embodiment_path)
     robot_docs_config = robot_docs_config or load_whoami_config()
     robot_docs_tool = create_robot_docs_tool(robot_docs_config, embeddings_model)
+    runtime_tools = (
+        list(robot_tools) if robot_tools is not None else initialize_rosbot_tools()
+    )
 
     def build_base_system_prompt(_context) -> str:
         return BASE_SYSTEM_PROMPT_TEMPLATE.format(embodiment=embodiment_text)
+
+    extra_prompt_sections = [ROSBOT_TOOLS_PROMPT_SECTION]
+    if robot_docs_tool:
+        extra_prompt_sections.append(ROBOT_DOCS_PROMPT_SECTION)
 
     return create_memory_agent_with_tools(
         memory_mgr=memory_mgr,
@@ -112,9 +169,9 @@ def build_memory_agent(
         base_system_prompt_builder=build_base_system_prompt,
         namespace=namespace,
         user_id=user_id,
-        base_tools=[WaitForSecondsTool()],
+        base_tools=runtime_tools,
         extra_tools=[robot_docs_tool],
-        extra_prompt_sections=[ROBOT_DOCS_PROMPT_SECTION] if robot_docs_tool else None,
+        extra_prompt_sections=extra_prompt_sections,
     )
 
 
