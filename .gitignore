@@ -186,3 +186,7 @@ panda/
 **.db-shm
 **.db-wal
 **.bin
+
+# Rag
+generated/
+man.md

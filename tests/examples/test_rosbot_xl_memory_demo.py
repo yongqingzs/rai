@@ -26,6 +26,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import Field
@@ -133,6 +134,138 @@ def test_welcome_message_is_ai_message():
 
     assert isinstance(message, AIMessage)
     assert "persistent memory" in message.content
+
+
+def test_load_robot_docs_config_reads_whoami_section(tmp_path):
+    demo = _load_demo_module()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[whoami]
+enabled = true
+root_dir = "docs/robot"
+build_vector_db = true
+k = 7
+"""
+    )
+
+    config = demo.load_robot_docs_config(str(config_path))
+
+    assert config == demo.RobotDocsConfig(
+        enabled=True,
+        root_dir="docs/robot",
+        build_vector_db=True,
+        k=7,
+    )
+
+
+def test_create_robot_docs_tool_returns_none_when_disabled():
+    demo = _load_demo_module()
+
+    tool = demo._create_robot_docs_tool(demo.RobotDocsConfig(enabled=False))
+
+    assert tool is None
+
+
+def test_create_robot_docs_tool_wraps_whoami_query_tool(monkeypatch, tmp_path):
+    demo = _load_demo_module()
+    generated_dir = tmp_path / "generated"
+    generated_dir.mkdir()
+    for filename in ("index.faiss", "index.pkl", "vdb_kwargs.json"):
+        (generated_dir / filename).write_text("{}")
+
+    monkeypatch.setattr(
+        demo.RobotDocsQueryTool,
+        "__init__",
+        lambda self, **kwargs: BaseTool.__init__(self, **kwargs),
+    )
+
+    tool = demo._create_robot_docs_tool(
+        demo.RobotDocsConfig(enabled=True, root_dir=str(tmp_path), k=3),
+        embeddings_model=None,
+    )
+
+    assert tool.name == "query_robot_docs"
+    assert "static whoami documentation" in tool.description
+    assert tool.root_dir == str(tmp_path)
+    assert tool.k == 3
+
+
+def test_create_robot_docs_tool_builds_vector_db_when_configured(
+    monkeypatch,
+    tmp_path,
+):
+    demo = _load_demo_module()
+    calls = []
+
+    class _Source:
+        @classmethod
+        def from_directory(cls, root_dir):
+            calls.append(("source", root_dir))
+            return "source"
+
+    class _Builder:
+        def __init__(self, root_dir, embedding=None):
+            calls.append(("builder", root_dir, embedding))
+
+        def build(self, source):
+            calls.append(("build", source))
+
+    monkeypatch.setattr(demo, "EmbodimentSource", _Source)
+    monkeypatch.setattr(demo, "FAISSBuilder", _Builder)
+    monkeypatch.setattr(demo, "_has_whoami_vector_db", lambda root_dir: True)
+    monkeypatch.setattr(
+        demo.RobotDocsQueryTool,
+        "__init__",
+        lambda self, **kwargs: BaseTool.__init__(self, **kwargs),
+    )
+    demo._create_robot_docs_tool(
+        demo.RobotDocsConfig(
+            enabled=True,
+            root_dir=str(tmp_path),
+            build_vector_db=True,
+        ),
+        embeddings_model=None,
+    )
+
+    assert calls == [
+        ("source", tmp_path),
+        ("builder", tmp_path / "generated", None),
+        ("build", "source"),
+    ]
+
+
+def test_build_memory_agent_includes_robot_docs_tool(monkeypatch, tmp_path):
+    demo = _load_demo_module()
+    memory_mgr = _MemoryManager()
+    captured = {}
+
+    class _Tool(BaseTool):
+        name: str = "query_robot_docs"
+        description: str = "robot docs"
+
+        def _run(self):
+            return "robot docs"
+
+    monkeypatch.setattr(demo, "get_llm_model", lambda *args, **kwargs: object())
+    monkeypatch.setattr(demo, "_load_embodiment", lambda path: "embodiment")
+    monkeypatch.setattr(demo, "_create_robot_docs_tool", lambda *args: _Tool())
+
+    def _create_agent(**kwargs):
+        captured.update(kwargs)
+        return "graph"
+
+    monkeypatch.setattr(demo, "create_memory_react_agent", _create_agent)
+
+    graph = demo.build_memory_agent(
+        memory_mgr,
+        tmp_path / "embodiment.json",
+        robot_docs_config=demo.RobotDocsConfig(enabled=True, root_dir="whoami"),
+        embeddings_model=object(),
+    )
+
+    assert graph == "graph"
+    assert "query_robot_docs" in [tool.name for tool in captured["tools"]]
 
 
 def test_short_term_summary_is_state_not_message():

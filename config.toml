@@ -62,3 +62,9 @@ short_term_path = "data/checkpoints.db"
 long_term_path = "data/store.db"
 connection = ""
 namespace = "default"
+
+[whoami]
+enabled = true
+root_dir = "examples/rosbotxl_whoami"
+build_vector_db = true
+k = 4

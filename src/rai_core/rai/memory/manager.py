@@ -14,6 +14,7 @@
 
 import logging
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
 from langchain_core.embeddings import Embeddings
@@ -159,6 +160,9 @@ def _create_sqlite_components(
     from langgraph.store.sqlite import SqliteStore
     from langgraph.store.sqlite.base import SqliteIndexConfig
 
+    _ensure_sqlite_parent_dir(short_term_path)
+    _ensure_sqlite_parent_dir(long_term_path)
+
     cm_checker = SqliteSaver.from_conn_string(short_term_path)
     checkpointer = cm_checker.__enter__()
     checkpointer.setup()
@@ -169,6 +173,14 @@ def _create_sqlite_components(
     store_store = cm_store.__enter__()
     store_store.setup()
     return checkpointer, store_store, cm_checker, cm_store
+
+
+def _ensure_sqlite_parent_dir(path: str) -> None:
+    if path == ":memory:":
+        return
+    parent = Path(path).expanduser().parent
+    if parent != Path("."):
+        parent.mkdir(parents=True, exist_ok=True)
 
 
 def _create_postgres_components(

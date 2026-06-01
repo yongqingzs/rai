@@ -24,10 +24,13 @@ Usage:
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import streamlit as st
+import tomli
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool
 from rai import get_embeddings_model, get_llm_model
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
 from rai.frontend.memory_streamlit import (
@@ -43,6 +46,10 @@ from rai.memory import (
 from rai.memory.long_term import render_long_term_memories
 from rai.tools.memory import create_memory_tools
 from rai.tools.time import WaitForSecondsTool
+
+from rai_whoami import EmbodimentSource
+from rai_whoami.tools import QueryDatabaseTool
+from rai_whoami.vector_db import FAISSBuilder
 
 # --- Constants ---
 
@@ -66,7 +73,35 @@ You have access to memory tools:
 Use these tools proactively:
 - When the user shares preferences or important information, save them with save_fact
 - When you identify or learn about a location with coordinates, use save_location with a pose like: {{"x": 1.0, "y": 2.0, "z": 0.0}}
-- When the user asks to forget something, use forget_memory"""
+- When the user asks to forget something, use forget_memory
+
+## Robot Documentation Retrieval
+If the query_robot_docs tool is available, use it for questions about the robot's static documentation: hardware specifications, sensors, capabilities, URDF details, manuals, or operating limits. Do not use it for user preferences, learned facts, remembered locations, or conversation memory."""
+
+
+@dataclass
+class RobotDocsConfig:
+    enabled: bool = False
+    root_dir: str = ""
+    build_vector_db: bool = False
+    k: int = 4
+
+
+class RobotDocsQueryTool(QueryDatabaseTool):
+    name: str = "query_robot_docs"
+    description: str = (
+        "Rag 向量库查询工具。"
+        "Search the robot's static whoami documentation, including hardware "
+        "specs, sensors, capabilities, URDF/documentation details, and operating "
+        "limits. Use this for robot documentation questions, not for user "
+        "preferences, conversation memory, or learned locations."
+    )
+
+
+def load_robot_docs_config(config_path: str = "config.toml") -> RobotDocsConfig:
+    with open(config_path, "rb") as f:
+        config_dict = tomli.load(f)
+    return RobotDocsConfig(**config_dict.get("whoami", {}))
 
 
 def _load_embodiment(path: Path) -> str:
@@ -91,11 +126,52 @@ def _load_embodiment(path: Path) -> str:
         return f"(Error loading embodiment: {e})"
 
 
+def _has_whoami_vector_db(root_dir: Path) -> bool:
+    generated_dir = root_dir / "generated"
+    return (
+        (generated_dir / "index.faiss").exists()
+        and (generated_dir / "index.pkl").exists()
+        and (generated_dir / "vdb_kwargs.json").exists()
+    )
+
+
+def _create_robot_docs_tool(
+    config: RobotDocsConfig,
+    embeddings_model=None,
+) -> BaseTool | None:
+    if not config.enabled:
+        return None
+
+    if not config.root_dir:
+        raise ValueError("[whoami] root_dir must be set when enabled = true")
+
+    root_dir = Path(config.root_dir)
+    if config.build_vector_db:
+        source = EmbodimentSource.from_directory(root_dir)
+        FAISSBuilder(root_dir / "generated", embedding=embeddings_model).build(source)
+
+    if not _has_whoami_vector_db(root_dir):
+        raise FileNotFoundError(
+            "Whoami vector DB not found. Expected generated/index.faiss, "
+            "generated/index.pkl, and generated/vdb_kwargs.json under "
+            f"{root_dir}. Build it with `build-whoami {root_dir} --build-vector-db` "
+            "or set [whoami] build_vector_db = true."
+        )
+
+    return RobotDocsQueryTool(
+        root_dir=str(root_dir),
+        embeddings_model=embeddings_model,
+        k=config.k,
+    )
+
+
 def build_memory_agent(
     memory_mgr: MemoryManager,
     embodiment_path: Path,
     user_id: str = "default",
     namespace: str = "default",
+    robot_docs_config: RobotDocsConfig | None = None,
+    embeddings_model=None,
 ) -> object:
     """Build a memory-aware agent graph.
 
@@ -125,6 +201,10 @@ def build_memory_agent(
         memory_tools_dict["forget"],
         WaitForSecondsTool(),
     ]
+    robot_docs_config = robot_docs_config or load_robot_docs_config()
+    robot_docs_tool = _create_robot_docs_tool(robot_docs_config, embeddings_model)
+    if robot_docs_tool is not None:
+        all_tools.append(robot_docs_tool)
 
     def build_system_prompt(context: MemoryAgentContext) -> str:
         long_term_memory = render_long_term_memories(
@@ -191,9 +271,12 @@ def run_memory_app():
     st.sidebar.header("Configuration")
 
     config = load_memory_config()
+    robot_docs_config = load_robot_docs_config()
     st.sidebar.markdown(
         f"**Backend:** `{config.backend}`\n**Namespace:** `{config.namespace}`"
     )
+    if robot_docs_config.enabled:
+        st.sidebar.markdown(f"**Robot Docs:** `{robot_docs_config.root_dir}`")
     st.sidebar.markdown("---")
 
     # Initialize memory manager
@@ -208,6 +291,7 @@ def run_memory_app():
             EMBEDDING_PATH,
             user_id=user_id,
             namespace=config.namespace,
+            robot_docs_config=robot_docs_config,
         )
         st.session_state["graph"] = graph
         st.session_state["_last_user"] = user_id
@@ -226,6 +310,7 @@ def run_memory_app():
             EMBEDDING_PATH,
             user_id=sidebar_state.user_id,
             namespace=config.namespace,
+            robot_docs_config=robot_docs_config,
         )
         st.session_state["graph"] = graph
         st.session_state["_last_user"] = sidebar_state.user_id
