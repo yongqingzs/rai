@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .config import WhoamiConfig, load_whoami_config
 from .models import EmbodimentInfo, EmbodimentSource
 from .pipeline import Pipeline, PipelineBuilder
 from .processors import get_default_postprocessors, get_default_preprocessors
-from .tools import QueryDatabaseTool
+from .tools import QueryDatabaseTool, RobotDocsQueryTool, create_robot_docs_tool
 
 __all__ = [
     "EmbodimentInfo",
@@ -23,6 +24,10 @@ __all__ = [
     "Pipeline",
     "PipelineBuilder",
     "QueryDatabaseTool",
+    "RobotDocsQueryTool",
+    "WhoamiConfig",
+    "create_robot_docs_tool",
     "get_default_postprocessors",
     "get_default_preprocessors",
+    "load_whoami_config",
 ]

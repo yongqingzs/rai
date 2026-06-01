@@ -12,6 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from rai.memory.agent_factory import (
+    build_memory_system_prompt,
+    create_default_memory_tools,
+    create_memory_agent_with_tools,
+)
 from rai.memory.config import MemoryConfig, load_memory_config
 from rai.memory.graph import MemoryAgentContext, MemoryState, create_memory_react_agent
 from rai.memory.manager import MemoryManager
@@ -21,6 +26,9 @@ __all__ = [
     "MemoryConfig",
     "MemoryManager",
     "MemoryState",
+    "build_memory_system_prompt",
+    "create_default_memory_tools",
+    "create_memory_agent_with_tools",
     "create_memory_react_agent",
     "load_memory_config",
 ]

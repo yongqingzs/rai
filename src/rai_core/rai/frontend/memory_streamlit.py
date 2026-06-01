@@ -20,6 +20,8 @@ from typing import Any, Callable
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
+from rai.memory.graph import MemoryAgentContext
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.manager import MemoryManager
 from rai.memory.session import (
@@ -248,3 +250,38 @@ def render_memory_sidebar(
         messages=st.session_state["messages"],
         summary=st.session_state.get("summary", ""),
     )
+
+
+def render_memory_chat_input(
+    graph,
+    sidebar_state: MemorySidebarState,
+    namespace: str,
+):
+    """Render chat input and invoke a memory graph for one user turn."""
+    prompt = st.chat_input()
+    if not prompt:
+        return None
+
+    human_msg = HumanMessage(content=prompt)
+    st.session_state.messages.append(human_msg)
+    st.chat_message("user").write(prompt)
+
+    with st.chat_message("assistant"):
+        st_callback = get_streamlit_cb(st.container())
+        context = MemoryAgentContext(
+            user_id=sidebar_state.user_id,
+            namespace=namespace,
+        )
+        result = streamlit_invoke(
+            graph,
+            callables=[st_callback],
+            thread_id=sidebar_state.thread_id,
+            context=context,
+            input_state={"messages": [human_msg]},
+        )
+
+        if result and "messages" in result:
+            st.session_state.messages = result["messages"]
+            st.session_state["summary"] = result.get("summary", "")
+            st.rerun()
+        return result

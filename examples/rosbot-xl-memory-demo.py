@@ -24,84 +24,36 @@ Usage:
 """
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import streamlit as st
-import tomli
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.tools import BaseTool
+from langchain_core.messages import AIMessage, ToolMessage
 from rai import get_embeddings_model, get_llm_model
-from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
 from rai.frontend.memory_streamlit import (
     render_chat_messages_with_tools,
+    render_memory_chat_input,
     render_memory_sidebar,
 )
 from rai.memory import (
-    MemoryAgentContext,
     MemoryManager,
-    create_memory_react_agent,
+    create_memory_agent_with_tools,
     load_memory_config,
 )
-from rai.memory.long_term import render_long_term_memories
-from rai.tools.memory import create_memory_tools
 from rai.tools.time import WaitForSecondsTool
 
-from rai_whoami import EmbodimentSource
-from rai_whoami.tools import QueryDatabaseTool
-from rai_whoami.vector_db import FAISSBuilder
+from rai_whoami import WhoamiConfig, create_robot_docs_tool, load_whoami_config
 
 # --- Constants ---
 
 EMBEDDING_PATH = Path(__file__).parent / "embodiments" / "rosbotxl_embodiment1.json"
 
-SYSTEM_PROMPT_TEMPLATE = """You are a ROSBot XL robot assistant. You can move around, look at objects, and help with tasks.
+BASE_SYSTEM_PROMPT_TEMPLATE = """You are a ROSBot XL robot assistant. You can move around, look at objects, and help with tasks.
 
 ## System Memory (Embodiment)
-{embodiment}
+{embodiment}"""
 
-## Long-Term Memory (Persisted Across Sessions)
-The following facts and locations are fully loaded in your context. Use this knowledge when answering questions or planning actions. If none are listed, you have no stored memories yet.
-{long_term_memory}
-
-## Available Memory Tools
-You have access to memory tools:
-- save_fact: Save text facts that should persist across sessions
-- save_location: Save structured spatial/location data
-- forget_memory: Delete stored memories
-
-Use these tools proactively:
-- When the user shares preferences or important information, save them with save_fact
-- When you identify or learn about a location with coordinates, use save_location with a pose like: {{"x": 1.0, "y": 2.0, "z": 0.0}}
-- When the user asks to forget something, use forget_memory
-
-## Robot Documentation Retrieval
+ROBOT_DOCS_PROMPT_SECTION = """## Robot Documentation Retrieval
 If the query_robot_docs tool is available, use it for questions about the robot's static documentation: hardware specifications, sensors, capabilities, URDF details, manuals, or operating limits. Do not use it for user preferences, learned facts, remembered locations, or conversation memory."""
-
-
-@dataclass
-class RobotDocsConfig:
-    enabled: bool = False
-    root_dir: str = ""
-    build_vector_db: bool = False
-    k: int = 4
-
-
-class RobotDocsQueryTool(QueryDatabaseTool):
-    name: str = "query_robot_docs"
-    description: str = (
-        "Rag 向量库查询工具。"
-        "Search the robot's static whoami documentation, including hardware "
-        "specs, sensors, capabilities, URDF/documentation details, and operating "
-        "limits. Use this for robot documentation questions, not for user "
-        "preferences, conversation memory, or learned locations."
-    )
-
-
-def load_robot_docs_config(config_path: str = "config.toml") -> RobotDocsConfig:
-    with open(config_path, "rb") as f:
-        config_dict = tomli.load(f)
-    return RobotDocsConfig(**config_dict.get("whoami", {}))
 
 
 def _load_embodiment(path: Path) -> str:
@@ -126,51 +78,12 @@ def _load_embodiment(path: Path) -> str:
         return f"(Error loading embodiment: {e})"
 
 
-def _has_whoami_vector_db(root_dir: Path) -> bool:
-    generated_dir = root_dir / "generated"
-    return (
-        (generated_dir / "index.faiss").exists()
-        and (generated_dir / "index.pkl").exists()
-        and (generated_dir / "vdb_kwargs.json").exists()
-    )
-
-
-def _create_robot_docs_tool(
-    config: RobotDocsConfig,
-    embeddings_model=None,
-) -> BaseTool | None:
-    if not config.enabled:
-        return None
-
-    if not config.root_dir:
-        raise ValueError("[whoami] root_dir must be set when enabled = true")
-
-    root_dir = Path(config.root_dir)
-    if config.build_vector_db:
-        source = EmbodimentSource.from_directory(root_dir)
-        FAISSBuilder(root_dir / "generated", embedding=embeddings_model).build(source)
-
-    if not _has_whoami_vector_db(root_dir):
-        raise FileNotFoundError(
-            "Whoami vector DB not found. Expected generated/index.faiss, "
-            "generated/index.pkl, and generated/vdb_kwargs.json under "
-            f"{root_dir}. Build it with `build-whoami {root_dir} --build-vector-db` "
-            "or set [whoami] build_vector_db = true."
-        )
-
-    return RobotDocsQueryTool(
-        root_dir=str(root_dir),
-        embeddings_model=embeddings_model,
-        k=config.k,
-    )
-
-
 def build_memory_agent(
     memory_mgr: MemoryManager,
     embodiment_path: Path,
     user_id: str = "default",
     namespace: str = "default",
-    robot_docs_config: RobotDocsConfig | None = None,
+    robot_docs_config: WhoamiConfig | None = None,
     embeddings_model=None,
 ) -> object:
     """Build a memory-aware agent graph.
@@ -187,43 +100,22 @@ def build_memory_agent(
     """
     llm = get_llm_model("complex_model", streaming=True)
     embodiment_text = _load_embodiment(embodiment_path)
+    robot_docs_config = robot_docs_config or load_whoami_config()
+    robot_docs_tool = create_robot_docs_tool(robot_docs_config, embeddings_model)
 
-    # Create memory tools (bound to store + namespace)
-    memory_tools_dict = create_memory_tools(
-        store=memory_mgr.store,
-        namespace=namespace,
-        user_id=user_id,
-    )
-    # All tools: save/forget memory + time tool (recall not needed, LTM is in context)
-    all_tools = [
-        memory_tools_dict["save_fact"],
-        memory_tools_dict["save_location"],
-        memory_tools_dict["forget"],
-        WaitForSecondsTool(),
-    ]
-    robot_docs_config = robot_docs_config or load_robot_docs_config()
-    robot_docs_tool = _create_robot_docs_tool(robot_docs_config, embeddings_model)
-    if robot_docs_tool is not None:
-        all_tools.append(robot_docs_tool)
+    def build_base_system_prompt(_context) -> str:
+        return BASE_SYSTEM_PROMPT_TEMPLATE.format(embodiment=embodiment_text)
 
-    def build_system_prompt(context: MemoryAgentContext) -> str:
-        long_term_memory = render_long_term_memories(
-            memory_mgr.store,
-            context.namespace,
-            context.user_id,
-        )
-        return SYSTEM_PROMPT_TEMPLATE.format(
-            embodiment=embodiment_text,
-            long_term_memory=long_term_memory,
-        )
-
-    graph = create_memory_react_agent(
+    return create_memory_agent_with_tools(
         memory_mgr=memory_mgr,
         llm=llm,
-        tools=all_tools,
-        system_prompt_builder=build_system_prompt,
+        base_system_prompt_builder=build_base_system_prompt,
+        namespace=namespace,
+        user_id=user_id,
+        base_tools=[WaitForSecondsTool()],
+        extra_tools=[robot_docs_tool],
+        extra_prompt_sections=[ROBOT_DOCS_PROMPT_SECTION] if robot_docs_tool else None,
     )
-    return graph
 
 
 def initialize_memory_mgr() -> MemoryManager:
@@ -271,7 +163,7 @@ def run_memory_app():
     st.sidebar.header("Configuration")
 
     config = load_memory_config()
-    robot_docs_config = load_robot_docs_config()
+    robot_docs_config = load_whoami_config()
     st.sidebar.markdown(
         f"**Backend:** `{config.backend}`\n**Namespace:** `{config.namespace}`"
     )
@@ -328,41 +220,7 @@ def run_memory_app():
             with st.sidebar.expander(f"Tool: {msg.name}", expanded=False):
                 st.code(msg.content, language="json")
 
-    # --- User input ---
-
-    prompt = st.chat_input()
-    if not prompt:
-        return
-
-    # Normal conversation flow
-    human_msg = HumanMessage(content=prompt)
-    st.session_state.messages.append(human_msg)
-    st.chat_message("user").write(prompt)
-
-    with st.chat_message("assistant"):
-        st_callback = get_streamlit_cb(st.container())
-        ctx = MemoryAgentContext(
-            user_id=user_id,
-            namespace=config.namespace,
-        )
-
-        input_state = {
-            "messages": [human_msg],
-        }
-
-        result = streamlit_invoke(
-            graph,
-            callables=[st_callback],
-            thread_id=sidebar_state.thread_id,
-            context=ctx,
-            input_state=input_state,
-        )
-
-        if result and "messages" in result:
-            # Replace UI messages with the checkpointed thread state.
-            st.session_state.messages = result["messages"]
-            st.session_state["summary"] = result.get("summary", "")
-            st.rerun()
+    render_memory_chat_input(graph, sidebar_state, config.namespace)
 
 
 if __name__ == "__main__":

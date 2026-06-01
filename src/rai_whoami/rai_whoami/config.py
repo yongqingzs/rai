@@ -1,4 +1,4 @@
-# Copyright (C) 2025 Robotec.AI
+# Copyright (C) 2026 Robotec.AI
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from rai_whoami.tools.robot_docs import RobotDocsQueryTool, create_robot_docs_tool
-from rai_whoami.tools.vector_db import QueryDatabaseTool
+from dataclasses import dataclass
+from typing import Optional
 
-__all__ = ["QueryDatabaseTool", "RobotDocsQueryTool", "create_robot_docs_tool"]
+import tomli
+
+
+@dataclass
+class WhoamiConfig:
+    enabled: bool = False
+    root_dir: str = ""
+    build_vector_db: bool = False
+    k: int = 4
+
+
+def load_whoami_config(config_path: Optional[str] = None) -> WhoamiConfig:
+    if config_path is None:
+        config_path = "config.toml"
+    with open(config_path, "rb") as f:
+        config_dict = tomli.load(f)
+    return WhoamiConfig(**config_dict.get("whoami", {}))
