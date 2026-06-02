@@ -1,5 +1,5 @@
 [vendor]
-simple_model = "openai"
+simple_model = "openai.vlm"
 complex_model = "openai.vlm"
 embeddings_model = "openai.embeddings"
 
@@ -10,22 +10,22 @@ embeddings_model = "amazon.titan-embed-text-v1"
 region_name = "us-east-1"
 
 [openai]
-base_url = "http://localhost:8000/v1"
+base_url = "http://10.0.40.149:11451/v1"
 api_key = "EMPTY"
-model = "default-chat-model"
+model = "qwen27b-mtp"
 
 [openai.vlm]
-base_url = "http://10.0.88.103:11451/v1"
+base_url = "http://10.0.40.149:11451/v1"
 api_key = "EMPTY"
 model = "qwen27b-mtp"
 
 [openai.embeddings]
-base_url = "http://10.0.88.103:11452/v1"
+base_url = "http://10.0.40.149:11452/v1"
 api_key = "EMPTY"
 model = "nomic"
 
 [ollama]
-base_url = "http://10.0.88.103:11434"
+base_url = "http://10.0.40.149:11434"
 simple_model = "qwen3.6:27b-q4_K_M"
 complex_model = "qwen3.6:27b-q4_K_M"
 embeddings_model = "nomic-embed-text-v2-moe:latest"

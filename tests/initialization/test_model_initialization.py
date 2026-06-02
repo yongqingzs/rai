@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,12 @@ class DummyModel:
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
+
+
+def get_class_from_string(class_path: str) -> type:
+    module_path, class_name = class_path.rsplit(".", 1)
+    module = import_module(module_path)
+    return getattr(module, class_name)
 
 
 def write_config(path: Path, config: str) -> Path:
@@ -235,6 +242,45 @@ model = "nomic"
     assert embeddings.kwargs["model"] == "nomic"
     assert embeddings.kwargs["base_url"] == "http://localhost:8082/v1"
     assert embeddings.kwargs["api_key"] == "embedding-key"
+
+
+def test_openai_embeddings_return_kwargs_reconstruct_without_env_key(
+    monkeypatch, tmp_path
+):
+    config = """
+[vendor]
+simple_model = "openai"
+complex_model = "openai.vlm"
+embeddings_model = "openai.embeddings"
+
+[openai]
+base_url = "https://openai.example/v1/"
+api_key = "root-key"
+model = "gpt-4o-mini"
+
+[openai.vlm]
+base_url = "http://localhost:8081/v1"
+api_key = "vlm-key"
+model = "qwen-vl"
+
+[openai.embeddings]
+base_url = "http://localhost:8082/v1"
+api_key = "embedding-key"
+model = "nomic"
+"""
+    config_path = write_config(tmp_path / "config.toml", config)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    _, kwargs = model_initialization.get_embeddings_model(
+        config_path=str(config_path), return_kwargs=True
+    )
+
+    assert kwargs["api_key"] == "embedding-key"
+    embeddings_class = kwargs.pop("class")
+    kwargs.pop("vendor")
+    reconstructed = get_class_from_string(embeddings_class)(**kwargs)
+
+    assert reconstructed.model == "nomic"
 
 
 def test_openai_endpoint_base_url_adds_v1_for_bare_host(tmp_path):

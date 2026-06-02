@@ -340,12 +340,15 @@ def get_embeddings_model(
                 .replace("class '", "")
                 .replace("'", "")
             )
-            return embeddings, {
+            kwargs = {
                 "class": c,
                 "model": model_config.embeddings_model,
                 "base_url": model_config.base_url,
                 "vendor": vendor,
             }
+            if model_config.api_key:
+                kwargs["api_key"] = model_config.api_key
+            return embeddings, kwargs
         return embeddings
 
     elif vendor == "aws":
