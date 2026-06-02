@@ -31,10 +31,19 @@ embeddings_model = "amazon.titan-embed-text-v1"
 region_name = "us-east-1"
 
 [openai]
-simple_model = "gpt-4o-mini"
-complex_model = "gpt-4o"
-embeddings_model = "text-embedding-ada-002"
 base_url = "https://api.openai.com/v1/"
+api_key = ""
+model = "gpt-4o-mini"
+
+[openai.vlm]
+base_url = "https://api.openai.com/v1/"
+api_key = ""
+model = "gpt-4o"
+
+[openai.embeddings]
+base_url = "https://api.openai.com/v1/"
+api_key = ""
+model = "text-embedding-ada-002"
 
 [ollama]
 simple_model = "llama3.2"

@@ -197,6 +197,77 @@ def test_get_embeddings_model_return_kwargs_openai(monkeypatch, tmp_path):
     assert "class" in kwargs
 
 
+def test_openai_named_endpoints(monkeypatch, tmp_path):
+    config = """
+[vendor]
+simple_model = "openai"
+complex_model = "openai.vlm"
+embeddings_model = "openai.embeddings"
+
+[openai]
+base_url = "https://openai.example/v1/"
+api_key = "root-key"
+model = "gpt-4o-mini"
+
+[openai.vlm]
+base_url = "http://localhost:8081/v1"
+api_key = "vlm-key"
+model = "qwen-vl"
+
+[openai.embeddings]
+base_url = "http://localhost:8082/v1"
+api_key = "embedding-key"
+model = "nomic"
+"""
+    config_path = write_config(tmp_path / "config.toml", config)
+
+    monkeypatch.setattr("langchain_openai.ChatOpenAI", DummyModel)
+    monkeypatch.setattr("langchain_openai.OpenAIEmbeddings", DummyModel)
+
+    llm = model_initialization.get_llm_model(
+        "complex_model", config_path=str(config_path)
+    )
+    assert llm.kwargs["model"] == "qwen-vl"
+    assert llm.kwargs["base_url"] == "http://localhost:8081/v1"
+    assert llm.kwargs["api_key"] == "vlm-key"
+
+    embeddings = model_initialization.get_embeddings_model(config_path=str(config_path))
+    assert embeddings.kwargs["model"] == "nomic"
+    assert embeddings.kwargs["base_url"] == "http://localhost:8082/v1"
+    assert embeddings.kwargs["api_key"] == "embedding-key"
+
+
+def test_openai_endpoint_base_url_adds_v1_for_bare_host(tmp_path):
+    config = """
+[vendor]
+simple_model = "openai"
+complex_model = "openai.vlm"
+embeddings_model = "openai.embeddings"
+
+[openai]
+base_url = "http://localhost:8000"
+model = "gpt-4o-mini"
+
+[openai.vlm]
+base_url = "http://localhost:8081"
+model = "qwen-vl"
+
+[openai.embeddings]
+base_url = "http://localhost:8082"
+model = "nomic"
+"""
+    config_path = write_config(tmp_path / "config.toml", config)
+
+    loaded_config = model_initialization.load_config(str(config_path))
+
+    assert loaded_config.openai.base_url == "http://localhost:8000/v1"
+    assert loaded_config.openai.endpoints["vlm"].base_url == "http://localhost:8081/v1"
+    assert (
+        loaded_config.openai.endpoints["embeddings"].base_url
+        == "http://localhost:8082/v1"
+    )
+
+
 def test_load_config_allows_missing_unused_vendor_sections(tmp_path):
     sparse_config = """
 [vendor]

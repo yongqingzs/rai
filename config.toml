@@ -1,7 +1,7 @@
 [vendor]
 simple_model = "openai"
-complex_model = "openai"
-embeddings_model = "ollama"
+complex_model = "openai.vlm"
+embeddings_model = "openai.embeddings"
 
 [aws]
 simple_model = "anthropic.claude-3-haiku-20240307-v1:0"
@@ -10,10 +10,19 @@ embeddings_model = "amazon.titan-embed-text-v1"
 region_name = "us-east-1"
 
 [openai]
-simple_model = "qwen27b"
-complex_model = "qwen27b"
-embeddings_model = "qwen27b"
-base_url = "http://192.168.2.30:8000/v1"
+base_url = "http://localhost:8000/v1"
+api_key = "EMPTY"
+model = "default-chat-model"
+
+[openai.vlm]
+base_url = "http://10.0.88.103:11451/v1"
+api_key = "EMPTY"
+model = "qwen27b-mtp"
+
+[openai.embeddings]
+base_url = "http://10.0.88.103:11452/v1"
+api_key = "EMPTY"
+model = "nomic"
 
 [ollama]
 base_url = "http://10.0.88.103:11434"
