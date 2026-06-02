@@ -24,6 +24,8 @@ dependencies = [
     "langchain-ollama",
     "langchain-google-genai",
     "langchain-community",
+    "langgraph-checkpoint-postgres",
+    "langgraph-checkpoint-sqlite",
     "requests>=2.32.2,<3.0.0",
     "coloredlogs>=15.0.1,<16.0.0",
     "tqdm>=4.66.4,<5.0.0",
@@ -39,6 +41,7 @@ dependencies = [
     "pydub>=0.25.1,<0.26.0",
     "streamlit>=1.44,<2.0.0",
     "numpy<2.0",
+    "httpx[socks]>=0.28.1",
 ]
 
 [project.scripts]

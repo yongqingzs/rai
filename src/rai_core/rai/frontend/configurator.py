@@ -923,7 +923,7 @@ def review_and_save():
             (test_langfuse, "Langfuse"),
             (test_langsmith, "LangSmith"),
         ]
-        if st.session_state.features["s2s"]:
+        if st.session_state.features.get("s2s", False):
             tests.extend(
                 [
                     (test_tts, "TTS"),

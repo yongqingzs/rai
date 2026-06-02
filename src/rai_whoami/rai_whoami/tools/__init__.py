@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from rai_whoami.tools.robot_docs import RobotDocsQueryTool, create_robot_docs_tool
 from rai_whoami.tools.vector_db import QueryDatabaseTool
 
-__all__ = ["QueryDatabaseTool"]
+__all__ = ["QueryDatabaseTool", "RobotDocsQueryTool", "create_robot_docs_tool"]
