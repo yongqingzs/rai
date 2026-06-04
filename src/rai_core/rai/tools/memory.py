@@ -45,16 +45,24 @@ class SaveLocationToolInput(BaseModel):
     class PoseInput(BaseModel):
         """2D/3D position for a stored location."""
 
-        x: float = Field(..., description="X coordinate in meters")
-        y: float = Field(..., description="Y coordinate in meters")
-        z: float = Field(..., description="Z coordinate in meters")
+        x: Optional[float] = Field(default=None, description="X coordinate in meters")
+        y: Optional[float] = Field(default=None, description="Y coordinate in meters")
+        z: Optional[float] = Field(default=None, description="Z coordinate in meters")
+        yaw: Optional[float] = Field(
+            default=None,
+            description="Optional yaw angle of the orientation in radians",
+        )
 
     location_name: str = Field(
         ..., description="Name of the location (e.g. 'Kitchen', 'Living Room')"
     )
     pose: Optional[PoseInput] = Field(
         default=None,
-        description="Optional position with x, y, z coordinates",
+        description="Optional position with x, y, z, and optional yaw coordinates",
+    )
+    confirmed: bool = Field(
+        default=False,
+        description="Must be set to True if the user explicitly confirmed using default values for missing coordinates.",
     )
     objects: Optional[list[str]] = Field(
         default=None,
@@ -200,7 +208,11 @@ def create_memory_tools(
         description: str = (
             "Save structured spatial/location data to long-term memory. "
             "Use when a named location with coordinates or objects is identified. "
-            "Includes position, detected objects, and natural language description."
+            "Includes position, detected objects, and natural language description. "
+            "CRITICAL: When saving a location manually, if any of the coordinates (x, y, z, yaw) "
+            "are missing, you MUST first ask/communicate with the user to confirm whether they "
+            "agree to use default values (e.g. z=0.0, yaw=0.0) before calling this tool. "
+            "Do NOT invoke this tool directly with missing/default coordinates without user confirmation."
         )
         args_schema: Type[SaveLocationToolInput] = SaveLocationToolInput
 
@@ -208,11 +220,34 @@ def create_memory_tools(
             self,
             location_name: str,
             pose: Optional[SaveLocationToolInput.PoseInput | dict | str] = None,
+            confirmed: bool = False,
             objects: Optional[list[str] | str] = None,
             description: Optional[str] = None,
         ) -> str:
             key = f"loc_{location_name.lower().replace(' ', '_')}"
             pose_data = _normalize_pose(pose)
+
+            if pose_data:
+                missing_coords = []
+                for coord in ["x", "y", "z", "yaw"]:
+                    if pose_data.get(coord) is None:
+                        missing_coords.append(coord)
+
+                if missing_coords:
+                    if not confirmed:
+                        missing_str = ", ".join(missing_coords)
+                        return (
+                            f"Error: The coordinates ({missing_str}) are missing or null in the input. "
+                            f"When manually saving a location, if any of x, y, z, yaw are missing, you MUST first "
+                            f"communicate/ask the user to confirm whether they agree to use default values (e.g., z=0.0, yaw=0.0) "
+                            f"for the target. Do NOT invoke the save_location tool directly. Stop and ask the user for confirmation now. "
+                            f"Only after the user explicitly agrees/confirms, you may call save_location again with confirmed=True "
+                            f"and supply default values (e.g. 0.0) for the missing coordinates."
+                        )
+                    else:
+                        for coord in missing_coords:
+                            pose_data[coord] = 0.0
+
             value = {
                 "location": location_name,
                 "pose": pose_data,
@@ -223,20 +258,24 @@ def create_memory_tools(
             store.put(spatial_ns, key, value)
             result = f"Location saved: '{location_name}'"
             if pose_data:
-                result += (
-                    f" at ({pose_data.get('x', '?')}, {pose_data.get('y', '?')}, "
-                    f"{pose_data.get('z', '?')})"
+                coords = (
+                    f"{pose_data.get('x', '?')}, {pose_data.get('y', '?')}, "
+                    f"{pose_data.get('z', '?')}"
                 )
+                if pose_data.get("yaw") is not None:
+                    coords += f", yaw={pose_data.get('yaw'):.4f}"
+                result += f" at ({coords})"
             return result
 
         def _arun(
             self,
             location_name: str,
             pose: Optional[SaveLocationToolInput.PoseInput | dict | str] = None,
+            confirmed: bool = False,
             objects: Optional[list[str] | str] = None,
             description: Optional[str] = None,
         ) -> str:
-            return self._run(location_name, pose, objects, description)
+            return self._run(location_name, pose, confirmed, objects, description)
 
     class RecallMemoryTool(BaseTool):
         """Search and recall stored memories.

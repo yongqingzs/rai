@@ -49,7 +49,7 @@ class DogPostureControlTool(BaseROS2Tool):
         else:
             return f"Invalid action: {action}. Must be 'stand_up' or 'lie_down'."
 
-        max_retries = 3
+        max_retries = 1
         retry_delay = 2.0
         timeout_sec = 30.0
 

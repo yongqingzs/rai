@@ -37,15 +37,16 @@ def test_save_location_accepts_structured_pose_and_json_string():
     result_structured = tools["save_location"].invoke(
         {
             "location_name": "Kitchen",
-            "pose": {"x": -0.2175, "y": -0.8775, "z": 0.0},
+            "pose": {"x": -0.2175, "y": -0.8775, "z": 0.0, "yaw": 1.57},
         }
     )
     assert "Kitchen" in result_structured
+    assert "yaw=1.5700" in result_structured
 
     result_json = tools["save_location"].invoke(
         {
             "location_name": "Living Room",
-            "pose": '{"x": -0.82, "y": 3.525, "z": 0.0}',
+            "pose": '{"x": -0.82, "y": 3.525, "z": 0.0, "yaw": -0.5}',
         }
     )
     assert "Living Room" in result_json
@@ -55,6 +56,7 @@ def test_save_location_accepts_structured_pose_and_json_string():
     )
     assert "Living Room" in recall_result
     assert '"x": -0.82' in recall_result
+    assert '"yaw": -0.5' in recall_result
 
 
 def test_save_location_accepts_objects_as_json_string():
@@ -64,7 +66,7 @@ def test_save_location_accepts_objects_as_json_string():
     result_empty = tools["save_location"].invoke(
         {
             "location_name": "Toilet",
-            "pose": '{"x": 0, "y": 0, "z": 3.0}',
+            "pose": '{"x": 0, "y": 0, "z": 3.0, "yaw": 0.0}',
             "objects": "[]",
             "description": "The toilet located at the specified coordinates.",
         }
@@ -101,3 +103,29 @@ def test_save_location_rejects_objects_json_object():
         pass
     else:
         raise AssertionError("Expected objects JSON object to fail validation")
+
+
+def test_save_location_requires_confirmation_when_coords_missing():
+    store = InMemoryStore()
+    tools = create_memory_tools(store=store, namespace="test", user_id="alice")
+
+    # Try saving with missing z and yaw, and confirmed=False
+    result = tools["save_location"].invoke(
+        {
+            "location_name": "Living Room",
+            "pose": {"x": 1.0, "y": 2.0},
+            "confirmed": False,
+        }
+    )
+    assert "Error: The coordinates (z, yaw) are missing" in result
+
+    # Try saving with missing z and yaw, and confirmed=True
+    result_confirmed = tools["save_location"].invoke(
+        {
+            "location_name": "Living Room",
+            "pose": {"x": 1.0, "y": 2.0},
+            "confirmed": True,
+        }
+    )
+    assert "Living Room" in result_confirmed
+    assert "yaw=0.0000" in result_confirmed

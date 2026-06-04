@@ -19,7 +19,7 @@ from geometry_msgs.msg import PoseStamped, Quaternion
 from nav2_msgs.action import NavigateToPose
 from pydantic import BaseModel, Field
 from rclpy.action import ActionClient
-from tf_transformations import quaternion_from_euler
+from tf_transformations import euler_from_quaternion, quaternion_from_euler
 
 from rai.tools.ros2.base import BaseROS2Tool
 
@@ -77,7 +77,21 @@ class GetCurrentPoseTool(BaseROS2Tool):
         transform_stamped = self.connector.get_transform(
             self.frame_id, self.robot_frame_id
         )
-        return str(transform_stamped)
+        # Extract translation coordinates
+        trans = transform_stamped.transform.translation
+        rot = transform_stamped.transform.rotation
+
+        # Calculate yaw orientation angle
+        quat = [rot.x, rot.y, rot.z, rot.w]
+        _, _, yaw = euler_from_quaternion(quat)
+
+        return (
+            f"Current Pose (frame_id: {self.frame_id}, robot_frame_id: {self.robot_frame_id}):\n"
+            f"  x: {trans.x:.4f}\n"
+            f"  y: {trans.y:.4f}\n"
+            f"  z: {trans.z:.4f}\n"
+            f"  yaw: {yaw:.4f} (radians)"
+        )
 
 
 class NavigateToPoseBlockingToolInput(BaseModel):

@@ -58,7 +58,14 @@ def test_get_current_pose_tool(ros_setup: None, request: pytest.FixtureRequest) 
     result = tool._run()
 
     connector.get_transform.assert_called_once_with("map", "base_link")
-    assert result == str(transform)
+    expected = (
+        "Current Pose (frame_id: map, robot_frame_id: base_link):\n"
+        "  x: 1.0000\n"
+        "  y: 2.0000\n"
+        "  z: 0.0000\n"
+        "  yaw: 0.0000 (radians)"
+    )
+    assert result == expected
 
 
 def test_get_status_string() -> None:
