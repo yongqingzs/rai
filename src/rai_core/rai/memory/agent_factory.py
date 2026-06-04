@@ -35,12 +35,9 @@ You have access to memory tools:
 - save_location: Save structured spatial/location data
 - forget_memory: Delete stored memories
 
-CRITICAL RULE FOR MANUAL LOCATION INPUT:
-When the user manually inputs a target location (e.g., coordinates in chat), if any of the coordinates (x, y, z, yaw) are missing, you MUST first communicate/ask the user to confirm whether they agree to use default values (e.g., z=0.0, yaw=0.0) for the target. You CANNOT invoke the save_location tool directly before receiving explicit user confirmation.
-
 Use these tools proactively:
 - When the user shares preferences or important information, save them with save_fact
-- When you identify or learn about a location with coordinates (and they are complete or confirmed by the user), use save_location with a pose like: {{"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0}}
+- When you identify or learn about a location with coordinates, use save_location with a pose like: {{"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.0}}
 - When the user asks to forget something, use forget_memory"""
 
 

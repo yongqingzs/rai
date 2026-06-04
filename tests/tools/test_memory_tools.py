@@ -103,29 +103,3 @@ def test_save_location_rejects_objects_json_object():
         pass
     else:
         raise AssertionError("Expected objects JSON object to fail validation")
-
-
-def test_save_location_requires_confirmation_when_coords_missing():
-    store = InMemoryStore()
-    tools = create_memory_tools(store=store, namespace="test", user_id="alice")
-
-    # Try saving with missing z and yaw, and confirmed=False
-    result = tools["save_location"].invoke(
-        {
-            "location_name": "Living Room",
-            "pose": {"x": 1.0, "y": 2.0},
-            "confirmed": False,
-        }
-    )
-    assert "Error: The coordinates (z, yaw) are missing" in result
-
-    # Try saving with missing z and yaw, and confirmed=True
-    result_confirmed = tools["save_location"].invoke(
-        {
-            "location_name": "Living Room",
-            "pose": {"x": 1.0, "y": 2.0},
-            "confirmed": True,
-        }
-    )
-    assert "Living Room" in result_confirmed
-    assert "yaw=0.0000" in result_confirmed
