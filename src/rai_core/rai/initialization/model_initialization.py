@@ -14,8 +14,9 @@
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple, cast
+from urllib.parse import urlparse
 
 import coloredlogs
 import tomli
@@ -59,6 +60,8 @@ class OllamaConfig(ModelConfig):
 @dataclass
 class OpenAIConfig(ModelConfig):
     base_url: str
+    api_key: str = ""
+    endpoints: Dict[str, "OpenAIConfig"] = field(default_factory=dict)
 
 
 @dataclass
@@ -114,6 +117,58 @@ _DEFAULT_TRACING = TracingConfig(
 )
 
 
+def _openai_config_from_dict(config_dict: Dict[str, Any]) -> OpenAIConfig:
+    root_config = {
+        key: value for key, value in config_dict.items() if not isinstance(value, dict)
+    }
+    endpoints = {
+        key: value for key, value in config_dict.items() if isinstance(value, dict)
+    }
+    openai = _openai_endpoint_from_dict(root_config)
+    openai.endpoints = {
+        endpoint_name: _openai_endpoint_from_dict(endpoint_config)
+        for endpoint_name, endpoint_config in endpoints.items()
+    }
+    return openai
+
+
+def _openai_endpoint_from_dict(config_dict: Dict[str, Any]) -> OpenAIConfig:
+    model = config_dict.get("model", "")
+    return OpenAIConfig(
+        simple_model=config_dict.get("simple_model", model),
+        complex_model=config_dict.get("complex_model", model),
+        embeddings_model=config_dict.get("embeddings_model", model),
+        base_url=_normalize_openai_base_url(config_dict.get("base_url", "")),
+        api_key=config_dict.get("api_key", ""),
+    )
+
+
+def _normalize_openai_base_url(base_url: str) -> str:
+    if not base_url:
+        return base_url
+    parsed_url = urlparse(base_url)
+    if parsed_url.scheme and parsed_url.netloc and parsed_url.path in ("", "/"):
+        return base_url.rstrip("/") + "/v1"
+    return base_url
+
+
+def _resolve_model_config(config: RAIConfig, vendor: str) -> Any:
+    if vendor.startswith("openai."):
+        endpoint_name = vendor.removeprefix("openai.")
+        try:
+            return config.openai.endpoints[endpoint_name]
+        except KeyError as e:
+            raise ValueError(f"Unknown OpenAI endpoint: {vendor}") from e
+    return getattr(config, vendor)
+
+
+def _openai_kwargs(model_config: OpenAIConfig) -> Dict[str, str]:
+    kwargs = {"base_url": model_config.base_url}
+    if model_config.api_key:
+        kwargs["api_key"] = model_config.api_key
+    return kwargs
+
+
 def load_config(config_path: Optional[str] = None) -> RAIConfig:
     if config_path is None:
         with open("config.toml", "rb") as f:
@@ -126,7 +181,7 @@ def load_config(config_path: Optional[str] = None) -> RAIConfig:
     # Missing sections get safe defaults so single-vendor setups work.
     aws = AWSConfig(**config_dict["aws"]) if "aws" in config_dict else _DEFAULT_AWS
     openai = (
-        OpenAIConfig(**config_dict["openai"])
+        _openai_config_from_dict(config_dict["openai"])
         if "openai" in config_dict
         else _DEFAULT_OPENAI
     )
@@ -172,7 +227,7 @@ def get_llm_model_config_and_vendor(
         else:
             vendor = config.vendor.complex_model
 
-    model_config = getattr(config, vendor)
+    model_config = _resolve_model_config(config, vendor)
     return model_config, vendor
 
 
@@ -187,12 +242,13 @@ def get_llm_model(
     )
     model = getattr(model_config, model_type)
     logger.info(f"Initializing {model_type}: Vendor: {vendor}, Model: {model}")
-    if vendor == "openai":
+    if vendor.startswith("openai"):
         from langchain_openai import ChatOpenAI
 
         model_config = cast(OpenAIConfig, model_config)
+        openai_kwargs = {**_openai_kwargs(model_config), **kwargs}
 
-        return ChatOpenAI(model=model, base_url=model_config.base_url, **kwargs)
+        return ChatOpenAI(model=model, **openai_kwargs)
     elif vendor == "aws":
         from langchain_aws import ChatBedrock
 
@@ -224,15 +280,16 @@ def get_llm_model_direct(
     **kwargs: Any,
 ) -> ChatOpenAI | ChatBedrock | ChatOllama | Any:
     config = load_config(config_path)
-    model_config = getattr(config, vendor)
+    model_config = _resolve_model_config(config, vendor)
 
     logger.info(f"Initializing Model: {model_name}, Vendor: {vendor}")
-    if vendor == "openai":
+    if vendor.startswith("openai"):
         from langchain_openai import ChatOpenAI
 
         model_config = cast(OpenAIConfig, model_config)
+        openai_kwargs = {**_openai_kwargs(model_config), **kwargs}
 
-        return ChatOpenAI(model=model_name, base_url=model_config.base_url, **kwargs)
+        return ChatOpenAI(model=model_name, **openai_kwargs)
     elif vendor == "aws":
         from langchain_aws import ChatBedrock
 
@@ -266,15 +323,15 @@ def get_embeddings_model(
     config = load_config(config_path)
     vendor = config.vendor.embeddings_model
 
-    model_config = getattr(config, vendor)
+    model_config = _resolve_model_config(config, vendor)
 
     logger.info(f"Using embeddings model: {vendor}-{model_config.embeddings_model}")
-    if vendor == "openai":
+    if vendor.startswith("openai"):
         from langchain_openai import OpenAIEmbeddings
 
         model_config = cast(OpenAIConfig, model_config)
         embeddings = OpenAIEmbeddings(
-            model=model_config.embeddings_model, base_url=model_config.base_url
+            model=model_config.embeddings_model, **_openai_kwargs(model_config)
         )
         if return_kwargs:
             c = (
@@ -283,12 +340,15 @@ def get_embeddings_model(
                 .replace("class '", "")
                 .replace("'", "")
             )
-            return embeddings, {
+            kwargs = {
                 "class": c,
                 "model": model_config.embeddings_model,
                 "base_url": model_config.base_url,
                 "vendor": vendor,
             }
+            if model_config.api_key:
+                kwargs["api_key"] = model_config.api_key
+            return embeddings, kwargs
         return embeddings
 
     elif vendor == "aws":

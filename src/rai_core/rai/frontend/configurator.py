@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
+import logging
 import os
 from functools import partial
-from typing import Dict, List
+from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 import numpy as np
 import requests
@@ -24,8 +27,59 @@ import tomli_w
 from langchain_aws import BedrockEmbeddings, ChatBedrock
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-import logging
-import importlib.util
+
+
+def openai_endpoint_options(config: Dict[str, Any]) -> List[str]:
+    openai_config = config.get("openai", {})
+    return [
+        f"openai.{name}"
+        for name, endpoint_config in openai_config.items()
+        if isinstance(endpoint_config, dict)
+    ]
+
+
+def vendor_options(config: Dict[str, Any]) -> List[str]:
+    options = ["openai", *openai_endpoint_options(config), "aws", "ollama"]
+    return list(dict.fromkeys(options))
+
+
+def get_vendor_config(config: Dict[str, Any], vendor_name: str) -> Dict[str, Any]:
+    if vendor_name.startswith("openai."):
+        endpoint_name = vendor_name.removeprefix("openai.")
+        return config["openai"][endpoint_name]
+    return config[vendor_name]
+
+
+def get_model_name(config: Dict[str, Any], vendor_name: str, model_type: str) -> str:
+    vendor_config = get_vendor_config(config, vendor_name)
+    return vendor_config.get(model_type, vendor_config.get("model", ""))
+
+
+def get_base_url(config: Dict[str, Any], vendor_name: str) -> str:
+    base_url = get_vendor_config(config, vendor_name).get("base_url", "")
+    if vendor_name.startswith("openai"):
+        return normalize_openai_base_url(base_url)
+    return base_url
+
+
+def get_api_key(config: Dict[str, Any], vendor_name: str) -> str:
+    return get_vendor_config(config, vendor_name).get("api_key", "")
+
+
+def option_index(options: List[str], value: str) -> int:
+    try:
+        return options.index(value)
+    except ValueError:
+        return 0
+
+
+def normalize_openai_base_url(base_url: str) -> str:
+    if not base_url:
+        return base_url
+    parsed_url = urlparse(base_url)
+    if parsed_url.scheme and parsed_url.netloc and parsed_url.path in ("", "/"):
+        return base_url.rstrip("/") + "/v1"
+    return base_url
 
 
 def get_sound_devices(
@@ -97,55 +151,75 @@ def model_selection():
             st.write(
                 f"Check out available {vendor} models [here](https://platform.openai.com/docs/models)"
             )
-            simple_model = st.text_input(
-                "Model for simple tasks",
-                value=st.session_state["config"]["openai"]["simple_model"],
-                key="simple_model",
+            openai_config = st.session_state["config"].setdefault("openai", {})
+            default_model = openai_config.get(
+                "model",
+                openai_config.get(
+                    "complex_model", openai_config.get("simple_model", "")
+                ),
             )
-            complex_model = st.text_input(
-                "Model for complex tasks",
-                value=st.session_state["config"]["openai"]["complex_model"],
-                key="complex_model",
+            openai_base_url = st.text_input(
+                "OpenAI API base URL",
+                value=openai_config.get("base_url", ""),
+                key="openai_api_base_url",
             )
-            embeddings_model = st.text_input(
-                "Embeddings model",
-                value=st.session_state["config"]["openai"]["embeddings_model"],
-                key="embeddings_model",
+            openai_api_key = st.text_input(
+                "OpenAI API key",
+                value=openai_config.get("api_key", ""),
+                key="openai_api_key",
+                type="password",
             )
-
-            def on_openai_compatible_api_change():
-                st.session_state.use_openai_compatible_api = (
-                    st.session_state.openai_compatible_api_checkbox
-                )
-
-            if "use_openai_compatible_api" not in st.session_state:
-                st.session_state.use_openai_compatible_api = False
-
-            use_openai_compatible_api = st.checkbox(
-                "Use OpenAI compatible API",
-                value=st.session_state.use_openai_compatible_api,
-                key="openai_compatible_api_checkbox",
-                on_change=on_openai_compatible_api_change,
+            openai_model = st.text_input(
+                "Default OpenAI model",
+                value=default_model,
+                key="openai_model",
             )
-            st.session_state.use_openai_compatible_api = use_openai_compatible_api
-
-            if use_openai_compatible_api:
-                st.info(
-                    "Used for OpenAI compatible endpoints, e.g. Ollama, vLLM... Make sure to specify `OPENAI_API_KEY` environment variable based on vendor's specification."
-                )
-                openai_api_base_url = st.text_input(
-                    "OpenAI API base URL",
-                    value=st.session_state["config"]["openai"]["base_url"],
-                    key="openai_api_base_url",
-                )
-            else:
-                openai_api_base_url = st.session_state["config"]["openai"]["base_url"]
-            st.session_state.config["openai"] = {
-                "simple_model": simple_model,
-                "complex_model": complex_model,
-                "embeddings_model": embeddings_model,
-                "base_url": openai_api_base_url,
+            endpoint_configs = {
+                name: endpoint_config
+                for name, endpoint_config in openai_config.items()
+                if isinstance(endpoint_config, dict)
             }
+            st.session_state.config["openai"] = {
+                "base_url": openai_base_url,
+                "api_key": openai_api_key,
+                "model": openai_model,
+                **endpoint_configs,
+            }
+
+            st.subheader("OpenAI compatible endpoints")
+            for endpoint_name in ["vlm", "embeddings"]:
+                endpoint_config = st.session_state.config["openai"].setdefault(
+                    endpoint_name, {}
+                )
+                endpoint_model = endpoint_config.get(
+                    "model",
+                    endpoint_config.get(
+                        "complex_model",
+                        endpoint_config.get("embeddings_model", ""),
+                    ),
+                )
+                st.markdown(f"**openai.{endpoint_name}**")
+                endpoint_base_url = st.text_input(
+                    f"{endpoint_name} base URL",
+                    value=endpoint_config.get("base_url", ""),
+                    key=f"openai_{endpoint_name}_base_url",
+                )
+                endpoint_api_key = st.text_input(
+                    f"{endpoint_name} API key",
+                    value=endpoint_config.get("api_key", ""),
+                    key=f"openai_{endpoint_name}_api_key",
+                    type="password",
+                )
+                endpoint_model = st.text_input(
+                    f"{endpoint_name} model",
+                    value=endpoint_model,
+                    key=f"openai_{endpoint_name}_model",
+                )
+                st.session_state.config["openai"][endpoint_name] = {
+                    "base_url": endpoint_base_url,
+                    "api_key": endpoint_api_key,
+                    "model": endpoint_model,
+                }
 
         elif vendor == "aws":
             st.write(
@@ -213,7 +287,10 @@ def model_selection():
         st.session_state.use_advanced_config = st.session_state.advanced_config_checkbox
 
     if "use_advanced_config" not in st.session_state:
-        st.session_state.use_advanced_config = False
+        configured_vendors = st.session_state.config.get("vendor", {}).values()
+        st.session_state.use_advanced_config = len(set(configured_vendors)) > 1 or any(
+            "." in vendor_name for vendor_name in configured_vendors
+        )
 
     use_advanced_config = st.checkbox(
         "Use advanced configuration",
@@ -232,31 +309,37 @@ def model_selection():
                     st.session_state[f"{model_type}_vendor_select"]
                 )
 
-            simple_model_vendor = st.selectbox(
+            model_vendor_options = vendor_options(st.session_state.config)
+            st.selectbox(
                 "Simple model vendor",
-                options=["openai", "aws", "ollama"],
-                index=["openai", "aws", "ollama"].index(
-                    st.session_state.config["vendor"]["simple_model"]
+                options=model_vendor_options,
+                index=option_index(
+                    model_vendor_options,
+                    st.session_state.config["vendor"].get("simple_model", "openai"),
                 ),
                 key="simple_vendor_select",
                 on_change=lambda: on_model_vendor_change("simple"),
             )
 
-            complex_model_vendor = st.selectbox(
+            st.selectbox(
                 "Complex model vendor",
-                options=["openai", "aws", "ollama"],
-                index=["openai", "aws", "ollama"].index(
-                    st.session_state.config["vendor"]["complex_model"]
+                options=model_vendor_options,
+                index=option_index(
+                    model_vendor_options,
+                    st.session_state.config["vendor"].get("complex_model", "openai"),
                 ),
                 key="complex_vendor_select",
                 on_change=lambda: on_model_vendor_change("complex"),
             )
 
-            embeddings_model_vendor = st.selectbox(
+            st.selectbox(
                 "Embeddings model vendor",
-                options=["openai", "aws", "ollama"],
-                index=["openai", "aws", "ollama"].index(
-                    st.session_state.config["vendor"]["embeddings_model"]
+                options=model_vendor_options,
+                index=option_index(
+                    model_vendor_options,
+                    st.session_state.config["vendor"].get(
+                        "embeddings_model", "openai"
+                    ),
                 ),
                 key="embeddings_vendor_select",
                 on_change=lambda: on_model_vendor_change("embeddings"),
@@ -779,11 +862,18 @@ def review_and_save():
 
         def create_chat_model(model_type: str):
             vendor_name = st.session_state.config["vendor"][f"{model_type}_model"]
-            model_name = st.session_state.config[vendor_name][f"{model_type}_model"]
+            model_name = get_model_name(
+                st.session_state.config, vendor_name, f"{model_type}_model"
+            )
 
-            if vendor_name == "openai":
-                base_url = st.session_state.config["openai"]["base_url"]
-                return ChatOpenAI(model=model_name, base_url=base_url)
+            if vendor_name.startswith("openai"):
+                model_kwargs = {
+                    "base_url": get_base_url(st.session_state.config, vendor_name)
+                }
+                api_key = get_api_key(st.session_state.config, vendor_name)
+                if api_key:
+                    model_kwargs["api_key"] = api_key
+                return ChatOpenAI(model=model_name, **model_kwargs)
             elif vendor_name == "aws":
                 return ChatBedrock(model_id=model_name)
             elif vendor_name == "ollama":
@@ -813,10 +903,24 @@ def review_and_save():
                 embeddings_model_vendor_name = st.session_state.config["vendor"][
                     "embeddings_model"
                 ]
-                if embeddings_model_vendor_name == "openai":
+                if embeddings_model_vendor_name.startswith("openai"):
+                    model_kwargs = {
+                        "base_url": get_base_url(
+                            st.session_state.config, embeddings_model_vendor_name
+                        )
+                    }
+                    api_key = get_api_key(
+                        st.session_state.config, embeddings_model_vendor_name
+                    )
+                    if api_key:
+                        model_kwargs["api_key"] = api_key
                     embeddings_model = OpenAIEmbeddings(
-                        model=st.session_state.config["openai"]["embeddings_model"],
-                        base_url=st.session_state.config["openai"]["base_url"],
+                        model=get_model_name(
+                            st.session_state.config,
+                            embeddings_model_vendor_name,
+                            "embeddings_model",
+                        ),
+                        **model_kwargs,
                     )
                 elif embeddings_model_vendor_name == "aws":
                     embeddings_model = BedrockEmbeddings(
@@ -892,12 +996,17 @@ def review_and_save():
         def test_recording_device(device_name: str):
             import sounddevice as sd
 
-            devices = sd.query_devices()
-            index = [device["name"] for device in devices].index(device_name)
-            sample_rate = int(devices[index]["default_samplerate"])
             try:
+                if device_name == "default":
+                    device = None
+                    device_info = sd.query_devices(kind="input")
+                else:
+                    devices = sd.query_devices()
+                    device = [device["name"] for device in devices].index(device_name)
+                    device_info = devices[device]
+                sample_rate = int(device_info["default_samplerate"])
                 recording = sd.rec(
-                    device=index,
+                    device=device,
                     frames=sample_rate,
                     samplerate=sample_rate,
                     channels=1,

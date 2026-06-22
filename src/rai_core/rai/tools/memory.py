@@ -48,13 +48,17 @@ class SaveLocationToolInput(BaseModel):
         x: float = Field(..., description="X coordinate in meters")
         y: float = Field(..., description="Y coordinate in meters")
         z: float = Field(..., description="Z coordinate in meters")
+        yaw: Optional[float] = Field(
+            default=None,
+            description="Optional yaw angle of the orientation in radians",
+        )
 
     location_name: str = Field(
         ..., description="Name of the location (e.g. 'Kitchen', 'Living Room')"
     )
     pose: Optional[PoseInput] = Field(
         default=None,
-        description="Optional position with x, y, z coordinates",
+        description="Optional position with x, y, z, and optional yaw coordinates",
     )
     objects: Optional[list[str]] = Field(
         default=None,
@@ -223,10 +227,13 @@ def create_memory_tools(
             store.put(spatial_ns, key, value)
             result = f"Location saved: '{location_name}'"
             if pose_data:
-                result += (
-                    f" at ({pose_data.get('x', '?')}, {pose_data.get('y', '?')}, "
-                    f"{pose_data.get('z', '?')})"
+                coords = (
+                    f"{pose_data.get('x', '?')}, {pose_data.get('y', '?')}, "
+                    f"{pose_data.get('z', '?')}"
                 )
+                if pose_data.get("yaw") is not None:
+                    coords += f", yaw={pose_data.get('yaw'):.4f}"
+                result += f" at ({coords})"
             return result
 
         def _arun(

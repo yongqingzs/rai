@@ -41,10 +41,14 @@ def format_long_term_item(schema: str, key: str, value: dict[str, Any]) -> str:
     location = value.get("location", key)
     pose = value.get("pose")
     if pose:
-        return (
+        output = (
             f"{location} ({pose.get('x', '?')}, {pose.get('y', '?')}, "
-            f"{pose.get('z', '?')})"
+            f"{pose.get('z', '?')}"
         )
+        if pose.get("yaw") is not None:
+            output += f", yaw={pose.get('yaw'):.4f}"
+        output += ")"
+        return output
     return str(location)
 
 

@@ -62,6 +62,7 @@ from .navigation.nav2 import (
     Nav2Toolkit,
     NavigateToPoseTool,
 )
+from .posture import DogPostureControlTool
 from .simple import (
     GetROS2ImageConfiguredTool,
     GetROS2TransformConfiguredTool,
@@ -71,6 +72,7 @@ __all__ = [
     "CallROS2ServiceTool",
     "CancelNavigateToPoseTool",
     "CancelROS2ActionTool",
+    "DogPostureControlTool",
     "GetNavigateToPoseFeedbackTool",
     "GetNavigateToPoseResultTool",
     "GetObjectPositionsTool",

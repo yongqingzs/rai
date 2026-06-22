@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import streamlit as st
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
 
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
 from rai.memory.graph import MemoryAgentContext
@@ -29,6 +29,7 @@ from rai.memory.session import (
     get_latest_session_id,
     get_session_ids,
     load_thread_state,
+    graph_config,
 )
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
 from rai.messages import HumanMultimodalMessage
@@ -91,6 +92,8 @@ def render_chat_messages_with_tools(messages: list):
             continue
 
         if isinstance(msg, HumanMessage):
+            if msg.additional_kwargs.get("system_notification"):
+                continue
             st.chat_message("user").write(msg.content)
             continue
 
@@ -234,6 +237,24 @@ def render_memory_sidebar(
                     st.caption(format_long_term_item(schema, key, value))
                     if st.button("Delete", key=f"delete_ltm_{schema}_{key}"):
                         memory_mgr.store.delete(ns, key)
+                        if schema == "facts":
+                            name = value.get("text", key)
+                            if len(name) > 40:
+                                name = name[:40] + "..."
+                            item_desc = f"fact '{name}'"
+                        else:
+                            name = value.get("location", key)
+                            item_desc = f"location '{name}'"
+                        system_msg = HumanMessage(
+                            content=f"[System Notification: The user deleted the long-term {item_desc} from the database via the UI. Please treat it as deleted/forgotten and do not mention or refer to it anymore.]",
+                            additional_kwargs={"system_notification": True}
+                        )
+                        graph.update_state(
+                            graph_config(thread_id),
+                            {"messages": [system_msg]}
+                        )
+                        if "messages" in st.session_state:
+                            st.session_state.messages.append(system_msg)
                         st.rerun()
 
     current_thread = st.session_state.get("_last_thread")
