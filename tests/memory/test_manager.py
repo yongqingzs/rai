@@ -32,3 +32,24 @@ def test_sqlite_memory_manager_creates_parent_directories(tmp_path):
     assert short_term_path.parent.exists()
     assert short_term_path.exists()
     assert long_term_path.exists()
+
+
+def test_memory_manager_checkpoint_allowlist_includes_multimodal_messages():
+    config = MemoryConfig(
+        enabled=True,
+        backend="sqlite",
+        short_term_path=":memory:",
+        long_term_path=":memory:",
+    )
+
+    memory_mgr = MemoryManager(config=config)
+    memory_mgr.start()
+    try:
+        serde = memory_mgr.checkpointer.serde
+        assert serde._custom_unpack_ext_hook is False
+        assert serde._allowed_msgpack_modules is not True
+        assert serde._allowed_msgpack_modules is not None
+        assert ("rai.messages.multimodal", "HumanMultimodalMessage") in serde._allowed_msgpack_modules
+        assert ("rai.messages.multimodal", "ToolMultimodalMessage") in serde._allowed_msgpack_modules
+    finally:
+        memory_mgr.stop()

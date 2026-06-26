@@ -19,11 +19,25 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from langchain_core.embeddings import Embeddings
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.store.base import BaseStore, IndexConfig
 
 from rai.memory.config import MemoryConfig, load_memory_config
+from rai.messages.multimodal import (
+    AIMultimodalMessage,
+    HumanMultimodalMessage,
+    SystemMultimodalMessage,
+    ToolMultimodalMessage,
+)
 
 logger = logging.getLogger(__name__)
+
+_MULTIMODAL_MSGPACK_ALLOWLIST = (
+    ("rai.messages.multimodal", "AIMultimodalMessage"),
+    ("rai.messages.multimodal", "HumanMultimodalMessage"),
+    ("rai.messages.multimodal", "SystemMultimodalMessage"),
+    ("rai.messages.multimodal", "ToolMultimodalMessage"),
+)
 
 
 def _default_index_config(
@@ -34,6 +48,12 @@ def _default_index_config(
         return IndexConfig(embed=embeddings, dims=len(sample))
     random_fn: Callable[[List[str]], List[List[float]]] = lambda _: [[0.1] * 768]
     return IndexConfig(embed=random_fn, dims=768)
+
+
+def _memory_serde() -> JsonPlusSerializer:
+    return JsonPlusSerializer(
+        allowed_msgpack_modules=_MULTIMODAL_MSGPACK_ALLOWLIST,
+    )
 
 
 class MemoryManager:
@@ -165,6 +185,7 @@ def _create_sqlite_components(
 
     cm_checker = SqliteSaver.from_conn_string(short_term_path)
     checkpointer = cm_checker.__enter__()
+    checkpointer.serde = _memory_serde()
     checkpointer.setup()
 
     idx = _default_index_config(embeddings)
@@ -192,6 +213,7 @@ def _create_postgres_components(
 
     cm_checker = PostgresSaver.from_conn_string(connection)
     checkpointer = cm_checker.__enter__()
+    checkpointer.serde = _memory_serde()
     checkpointer.setup()
 
     pg_index = None
