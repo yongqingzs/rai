@@ -24,7 +24,7 @@ from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
 from rai.frontend.multimodal import (
     collect_multimodal_tool_images,
     render_human_message,
-    render_tool_message_with_images,
+    render_image_list,
 )
 from rai.memory.graph import MemoryAgentContext
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
@@ -115,6 +115,8 @@ def render_chat_messages_with_tools(messages: list):
                             if entry.output is not None:
                                 st.caption("Output")
                                 st.code(entry.output.content, language="json")
+                            images = multimodal_tool_images.get(entry.tool_call_id)
+                            render_image_list(images)
             continue
 
         if isinstance(msg, ToolMessage):
@@ -123,10 +125,11 @@ def render_chat_messages_with_tools(messages: list):
                 for entries in tool_entries.values()
                 for entry in entries
             }:
-                render_tool_message_with_images(
-                    msg,
-                    multimodal_tool_images.get(msg.tool_call_id),
-                )
+                with st.chat_message("assistant"):
+                    with st.expander(f"Tool: {msg.name}", expanded=False):
+                        st.caption("Output")
+                        st.code(msg.content, language="json")
+                        render_image_list(multimodal_tool_images.get(msg.tool_call_id))
 
 
 def render_memory_sidebar(

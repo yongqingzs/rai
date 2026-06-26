@@ -78,6 +78,10 @@ def render_tool_message_with_images(
         with st.expander(expand_label or f"Tool: {msg.name}", expanded=False):
             st.caption("Output")
             st.code(msg.content, language="json")
-            if images:
-                for image in images:
-                    _render_image(image)
+            render_image_list(images)
+
+
+def render_image_list(images: list[str] | None) -> None:
+    if images:
+        for image in images:
+            _render_image(image)

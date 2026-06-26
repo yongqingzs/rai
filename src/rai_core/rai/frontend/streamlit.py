@@ -22,7 +22,7 @@ from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
 from rai.frontend.multimodal import (
     collect_multimodal_tool_images,
     render_human_message,
-    render_tool_message_with_images,
+    render_image_list,
 )
 from rai.messages import HumanMultimodalMessage
 
@@ -55,10 +55,10 @@ def run_streamlit_app(
         elif isinstance(msg, HumanMessage):
             render_human_message(msg)
         elif isinstance(msg, ToolMessage):
-            render_tool_message_with_images(
-                msg,
-                multimodal_tool_images.get(msg.tool_call_id),
-            )
+            with st.chat_message("assistant"):
+                with st.expander(f"Tool: {msg.name}", expanded=False):
+                    st.code(msg.content, language="json")
+                    render_image_list(multimodal_tool_images.get(msg.tool_call_id))
 
     if prompt:
         st.session_state.messages.append(HumanMessage(content=prompt))
