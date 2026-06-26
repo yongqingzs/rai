@@ -23,7 +23,7 @@ import numpy as np
 import streamlit as st
 from langchain_core.messages import HumanMessage, ToolMessage
 
-from rai.messages import HumanMultimodalMessage
+from rai.messages import HumanMultimodalMessage, get_stored_artifacts
 
 
 def _render_image(image_b64: str) -> None:
@@ -65,6 +65,16 @@ def collect_multimodal_tool_images(messages: list[Any]) -> dict[str, list[str]]:
         if isinstance(msg, HumanMultimodalMessage) and getattr(msg, "tool_call_id", None):
             if isinstance(msg.images, list):
                 images_by_tool_call_id[msg.tool_call_id].extend(msg.images)
+        if isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", None):
+            for artifact in get_stored_artifacts(msg.tool_call_id):
+                if not isinstance(artifact, dict):
+                    continue
+                for key in ("raw_images", "images"):
+                    value = artifact.get(key, [])
+                    if isinstance(value, list):
+                        images_by_tool_call_id[msg.tool_call_id].extend(
+                            [image for image in value if isinstance(image, str)]
+                        )
     return dict(images_by_tool_call_id)
 
 

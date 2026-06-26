@@ -116,7 +116,7 @@ class ToolMultimodalMessage(ToolMessage, MultimodalMessage):
         """OpenAI does not allow images in the tool message.
         Functions dumps the message into human multimodal message and tool message.
         """
-        if isinstance(self.images, list):
+        if isinstance(self.images, list) and len(self.images) > 0:
             human_message = HumanMultimodalMessage(
                 content=f"Image returned by a tool call {self.tool_call_id}",
                 images=self.images,
@@ -132,7 +132,13 @@ class ToolMultimodalMessage(ToolMessage, MultimodalMessage):
             return [tool_message, human_message]
         else:
             # TODO(maciejmajek): find out if content can be a list
-            return ToolMessage(tool_call_id=self.tool_call_id, content=self.content)
+            return ToolMessage(
+                tool_call_id=self.tool_call_id,
+                name=self.name,
+                content=" ".join([part.get("text", "") for part in self.content])
+                if isinstance(self.content, list)
+                else self.content,
+            )
 
     def _postprocess_bedrock(self):
         return self._postprocess_openai()
