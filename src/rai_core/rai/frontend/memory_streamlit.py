@@ -21,6 +21,10 @@ import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
 
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
+from rai.frontend.multimodal import (
+    render_human_message,
+    render_human_multimodal_message,
+)
 from rai.memory.graph import MemoryAgentContext
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.manager import MemoryManager
@@ -89,12 +93,11 @@ def render_chat_messages_with_tools(messages: list):
     tool_entries = collect_tool_call_entries(messages)
     for index, msg in enumerate(messages):
         if isinstance(msg, HumanMultimodalMessage):
+            render_human_multimodal_message(msg)
             continue
 
         if isinstance(msg, HumanMessage):
-            if msg.additional_kwargs.get("system_notification"):
-                continue
-            st.chat_message("user").write(msg.content)
+            render_human_message(msg)
             continue
 
         if isinstance(msg, AIMessage):

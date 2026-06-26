@@ -19,6 +19,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
 
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
+from rai.frontend.multimodal import (
+    render_human_message,
+    render_human_multimodal_message,
+)
 from rai.messages import HumanMultimodalMessage
 
 
@@ -45,9 +49,9 @@ def run_streamlit_app(
             if msg.content:
                 st.chat_message("assistant").write(msg.content)
         elif isinstance(msg, HumanMultimodalMessage):
-            continue
+            render_human_multimodal_message(msg)
         elif isinstance(msg, HumanMessage):
-            st.chat_message("user").write(msg.content)
+            render_human_message(msg)
         elif isinstance(msg, ToolMessage):
             with st.sidebar.expander(f"Tool: {msg.name}", expanded=False):
                 st.code(msg.content, language="json")
