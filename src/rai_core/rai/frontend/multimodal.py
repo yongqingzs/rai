@@ -15,11 +15,13 @@
 from __future__ import annotations
 
 import base64
+from collections import defaultdict
+from typing import Any
 
 import cv2
 import numpy as np
 import streamlit as st
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from rai.messages import HumanMultimodalMessage
 
@@ -55,3 +57,27 @@ def render_human_message(msg: HumanMessage) -> None:
     if msg.additional_kwargs.get("system_notification"):
         return
     st.chat_message("user").write(msg.content)
+
+
+def collect_multimodal_tool_images(messages: list[Any]) -> dict[str, list[str]]:
+    images_by_tool_call_id: dict[str, list[str]] = defaultdict(list)
+    for msg in messages:
+        if isinstance(msg, HumanMultimodalMessage) and getattr(msg, "tool_call_id", None):
+            if isinstance(msg.images, list):
+                images_by_tool_call_id[msg.tool_call_id].extend(msg.images)
+    return dict(images_by_tool_call_id)
+
+
+def render_tool_message_with_images(
+    msg: ToolMessage,
+    images: list[str] | None = None,
+    *,
+    expand_label: str | None = None,
+) -> None:
+    with st.chat_message("assistant"):
+        with st.expander(expand_label or f"Tool: {msg.name}", expanded=False):
+            st.caption("Output")
+            st.code(msg.content, language="json")
+            if images:
+                for image in images:
+                    _render_image(image)

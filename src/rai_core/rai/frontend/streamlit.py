@@ -20,8 +20,9 @@ from langchain_core.runnables import Runnable
 
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
 from rai.frontend.multimodal import (
+    collect_multimodal_tool_images,
     render_human_message,
-    render_human_multimodal_message,
+    render_tool_message_with_images,
 )
 from rai.messages import HumanMultimodalMessage
 
@@ -44,17 +45,20 @@ def run_streamlit_app(
         st.session_state["messages"] = [AIMessage(content=initial_message)]
 
     prompt = st.chat_input()
+    multimodal_tool_images = collect_multimodal_tool_images(st.session_state.messages)
     for msg in st.session_state.messages:
         if isinstance(msg, AIMessage):
             if msg.content:
                 st.chat_message("assistant").write(msg.content)
         elif isinstance(msg, HumanMultimodalMessage):
-            render_human_multimodal_message(msg)
+            continue
         elif isinstance(msg, HumanMessage):
             render_human_message(msg)
         elif isinstance(msg, ToolMessage):
-            with st.sidebar.expander(f"Tool: {msg.name}", expanded=False):
-                st.code(msg.content, language="json")
+            render_tool_message_with_images(
+                msg,
+                multimodal_tool_images.get(msg.tool_call_id),
+            )
 
     if prompt:
         st.session_state.messages.append(HumanMessage(content=prompt))
