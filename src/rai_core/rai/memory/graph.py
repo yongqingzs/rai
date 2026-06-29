@@ -43,6 +43,7 @@ from rai.messages import HumanMultimodalMessage
 class MemoryAgentContext:
     user_id: str
     namespace: str
+    transient_images: list[str] | None = None
 
 
 class MemoryState(TypedDict):
@@ -62,6 +63,13 @@ class MemoryState(TypedDict):
 
 
 SystemPromptBuilder = Callable[[MemoryAgentContext], str]
+
+
+def _message_text(message: HumanMessage) -> str:
+    text = message.text
+    if isinstance(text, str):
+        return text
+    return str(text)
 
 
 def _inject_summary(system_prompt: str, summary: str) -> str:
@@ -140,6 +148,16 @@ def create_memory_react_agent(
             conversation_messages = [
                 m for m in state["messages"] if not isinstance(m, SystemMessage)
             ]
+            if runtime.context.transient_images:
+                conversation_messages = list(conversation_messages)
+                for index in range(len(conversation_messages) - 1, -1, -1):
+                    message = conversation_messages[index]
+                    if isinstance(message, HumanMessage):
+                        conversation_messages[index] = HumanMultimodalMessage(
+                            content=_message_text(message),
+                            images=runtime.context.transient_images,
+                        )
+                        break
             react_messages = [
                 SystemMessage(content=system_prompt),
                 *conversation_messages,

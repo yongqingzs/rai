@@ -18,9 +18,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import streamlit as st
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
+from rai.frontend.chat_input import render_multimodal_chat_input
 from rai.frontend.multimodal import (
     collect_multimodal_tool_images,
     render_human_message,
@@ -33,8 +34,8 @@ from rai.memory.session import (
     delete_session,
     get_latest_session_id,
     get_session_ids,
-    load_thread_state,
     graph_config,
+    load_thread_state,
 )
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
 from rai.messages import HumanMultimodalMessage
@@ -254,11 +255,10 @@ def render_memory_sidebar(
                             item_desc = f"location '{name}'"
                         system_msg = HumanMessage(
                             content=f"[System Notification: The user deleted the long-term {item_desc} from the database via the UI. Please treat it as deleted/forgotten and do not mention or refer to it anymore.]",
-                            additional_kwargs={"system_notification": True}
+                            additional_kwargs={"system_notification": True},
                         )
                         graph.update_state(
-                            graph_config(thread_id),
-                            {"messages": [system_msg]}
+                            graph_config(thread_id), {"messages": [system_msg]}
                         )
                         if "messages" in st.session_state:
                             st.session_state.messages.append(system_msg)
@@ -290,19 +290,20 @@ def render_memory_chat_input(
     namespace: str,
 ):
     """Render chat input and invoke a memory graph for one user turn."""
-    prompt = st.chat_input()
-    if not prompt:
+    submission = render_multimodal_chat_input()
+    if not submission:
         return None
 
-    human_msg = HumanMessage(content=prompt)
+    human_msg = HumanMessage(content=submission.text)
     st.session_state.messages.append(human_msg)
-    st.chat_message("user").write(prompt)
+    st.chat_message("user").write(submission.text)
 
     with st.chat_message("assistant"):
         st_callback = get_streamlit_cb(st.container())
         context = MemoryAgentContext(
             user_id=sidebar_state.user_id,
             namespace=namespace,
+            transient_images=submission.images,
         )
         result = streamlit_invoke(
             graph,

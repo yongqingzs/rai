@@ -36,6 +36,7 @@ from rai.memory.graph import MemoryAgentContext, create_memory_react_agent
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.session import delete_session, get_latest_session_id, load_thread_state
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
+from rai.messages import HumanMultimodalMessage
 
 import rai_whoami.tools.robot_docs as robot_docs
 from rai_whoami import WhoamiConfig, create_robot_docs_tool, load_whoami_config
@@ -336,6 +337,46 @@ def test_memory_graph_injects_summary_without_checkpointing_summary_message(
     assert isinstance(llm.calls[-1][0], SystemMessage)
     assert "## Short-Term Memory Summary" in llm.calls[-1][0].content
     assert snapshot.values["summary"] in llm.calls[-1][0].content
+
+
+def test_memory_graph_injects_transient_images_without_checkpointing_them():
+    llm = _RecordingFakeChatModel(responses=["image analyzed"])
+    memory_mgr = _GraphMemoryManager()
+    graph = create_memory_react_agent(
+        memory_mgr=memory_mgr,
+        llm=llm,
+        tools=[],
+        system_prompt_builder=lambda context: "base system prompt",
+    )
+    config = {"configurable": {"thread_id": "transient-image"}}
+    context = MemoryAgentContext(
+        user_id="alice",
+        namespace="default",
+        transient_images=["aW1hZ2UtYnl0ZXM="],
+    )
+
+    graph.invoke(
+        {"messages": [HumanMessage(content="Describe this image")]},
+        config=config,
+        context=context,
+    )
+
+    snapshot = graph.get_state(config)
+    checkpoint_human_messages = [
+        msg for msg in snapshot.values["messages"] if isinstance(msg, HumanMessage)
+    ]
+
+    assert checkpoint_human_messages
+    assert not any(
+        isinstance(msg, HumanMultimodalMessage) for msg in checkpoint_human_messages
+    )
+    assert checkpoint_human_messages[-1].content == "Describe this image"
+
+    model_human_messages = [
+        msg for msg in llm.calls[-1] if isinstance(msg, HumanMessage)
+    ]
+    assert isinstance(model_human_messages[-1], HumanMultimodalMessage)
+    assert model_human_messages[-1].images == ["aW1hZ2UtYnl0ZXM="]
 
 
 def test_collect_tool_call_entries_matches_outputs():
