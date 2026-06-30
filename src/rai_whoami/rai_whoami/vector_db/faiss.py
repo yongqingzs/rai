@@ -35,6 +35,8 @@ from rai_whoami.vector_db.builder import VectorDBBuilder
 
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 150
+EMBEDDING_DOCUMENT_PREFIX = "search_document: "
+EMBEDDING_QUERY_PREFIX = "search_query: "
 FAISS_DISTANCE_STRATEGIES = {
     "l2": DistanceStrategy.EUCLIDEAN_DISTANCE,
     "cosine": DistanceStrategy.COSINE,
@@ -111,11 +113,32 @@ class NormalizedEmbeddings(Embeddings):
         return _normalize_vector(self.embeddings.embed_query(text))
 
 
+class PrefixedEmbeddings(Embeddings):
+    def __init__(
+        self,
+        embeddings: Embeddings,
+        document_prefix: str = EMBEDDING_DOCUMENT_PREFIX,
+        query_prefix: str = EMBEDDING_QUERY_PREFIX,
+    ):
+        self.embeddings = embeddings
+        self.document_prefix = document_prefix
+        self.query_prefix = query_prefix
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return self.embeddings.embed_documents(
+            [f"{self.document_prefix}{text}" for text in texts]
+        )
+
+    def embed_query(self, text: str) -> List[float]:
+        return self.embeddings.embed_query(f"{self.query_prefix}{text}")
+
+
 def _prepare_embeddings(
     embeddings: Embeddings,
     distance_strategy: str,
     normalize_embeddings: bool,
 ) -> tuple[Embeddings, bool]:
+    embeddings = PrefixedEmbeddings(embeddings)
     if distance_strategy == "inner_product" and normalize_embeddings:
         return NormalizedEmbeddings(embeddings), False
     return embeddings, normalize_embeddings
