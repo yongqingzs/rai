@@ -63,10 +63,10 @@ class ToolCallGuard:
         return cls(
             policies={
                 "query_robot_docs": ToolPolicy(
-                    max_calls_per_turn=2,
-                    max_consecutive_calls=1,
+                    max_calls_per_turn=3,
+                    max_consecutive_calls=None,
                     block_similar_args=True,
-                    similar_args_threshold=0.3,
+                    similar_args_threshold=0.75,
                 ),
                 "save_fact": ToolPolicy(
                     max_calls_per_turn=5,
