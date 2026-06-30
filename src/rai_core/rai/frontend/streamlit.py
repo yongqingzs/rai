@@ -19,6 +19,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
 
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
+from rai.frontend.chat_input import (
+    render_multimodal_chat_input,
+    replace_latest_user_message_with_transient_images,
+)
+from rai.frontend.multimodal import (
+    collect_multimodal_tool_images,
+    render_human_message,
+    render_image_list,
+)
 from rai.messages import HumanMultimodalMessage
 
 
@@ -39,7 +48,8 @@ def run_streamlit_app(
     if "messages" not in st.session_state:
         st.session_state["messages"] = [AIMessage(content=initial_message)]
 
-    prompt = st.chat_input()
+    submission = render_multimodal_chat_input()
+    multimodal_tool_images = collect_multimodal_tool_images(st.session_state.messages)
     for msg in st.session_state.messages:
         if isinstance(msg, AIMessage):
             if msg.content:
@@ -47,19 +57,26 @@ def run_streamlit_app(
         elif isinstance(msg, HumanMultimodalMessage):
             continue
         elif isinstance(msg, HumanMessage):
-            st.chat_message("user").write(msg.content)
+            render_human_message(msg)
         elif isinstance(msg, ToolMessage):
-            with st.sidebar.expander(f"Tool: {msg.name}", expanded=False):
-                st.code(msg.content, language="json")
+            with st.chat_message("assistant"):
+                with st.expander(f"Tool: {msg.name}", expanded=False):
+                    st.code(msg.content, language="json")
+                    render_image_list(multimodal_tool_images.get(msg.tool_call_id))
 
-    if prompt:
-        st.session_state.messages.append(HumanMessage(content=prompt))
-        st.chat_message("user").write(prompt)
+    if submission:
+        human_msg = HumanMessage(content=submission.text)
+        st.session_state.messages.append(human_msg)
+        st.chat_message("user").write(submission.text)
+        invoke_messages = replace_latest_user_message_with_transient_images(
+            st.session_state.messages,
+            submission.images,
+        )
         with st.chat_message("assistant"):
             st_callback = get_streamlit_cb(st.container())
             streamlit_invoke(
                 st.session_state["graph"],
-                st.session_state.messages,
+                invoke_messages,
                 [st_callback],
                 thread_id=thread_id,
             )

@@ -4951,7 +4951,7 @@ sdist = { url = "https://mirrors.aliyun.com/pypi/packages/a3/ec/d16bb3d94ccf4552
 
 [[package]]
 name = "rai-perception"
-version = "0.2.2"
+version = "0.3.0"
 source = { editable = "src/rai_extensions/rai_perception" }
 dependencies = [
     { name = "rai-core" },

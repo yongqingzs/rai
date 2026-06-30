@@ -12,46 +12,133 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pickle
+import base64
+import json
+import re
 from pathlib import Path
 from typing import Any, List, TypedDict
 
 
-class MultimodalArtifact(TypedDict):
+class MultimodalArtifact(TypedDict, total=False):
     images: List[str]  # base64 encoded images
+    raw_images: List[str]  # base64 encoded images stored outside checkpoints
     audios: List[str]
+    summary: str
+
+
+class ToolArtifactRecord(TypedDict, total=False):
+    summary: str
+    images: List[str]
+    raw_images: List[str]
+
+
+def _default_artifact_root(db_path: str | Path = "data/artifacts") -> Path:
+    return Path(db_path)
+
+
+def _safe_tool_call_id(tool_call_id: str) -> str:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", tool_call_id)
+    return safe_id or "unknown_tool_call"
+
+
+def _tool_artifact_dir(tool_call_id: str, root: str | Path = "data/artifacts") -> Path:
+    return _default_artifact_root(root) / _safe_tool_call_id(tool_call_id)
+
+
+def _write_image(image_b64: str, output_path: Path) -> None:
+    output_path.write_bytes(base64.b64decode(image_b64))
+
+
+def _read_image(image_path: Path) -> str:
+    return base64.b64encode(image_path.read_bytes()).decode("utf-8")
 
 
 def store_artifacts(
-    tool_call_id: str, artifacts: List[Any], db_path="artifact_database.pkl"
-):
-    # TODO(boczekbartek): refactor
-    db_path = Path(db_path)
-    if not db_path.is_file():
-        artifact_database = {}
-        with open("artifact_database.pkl", "wb") as file:
-            pickle.dump(artifact_database, file)
-    with open("artifact_database.pkl", "rb") as file:
-        artifact_database = pickle.load(file)
-        if tool_call_id not in artifact_database:
-            artifact_database[tool_call_id] = artifacts
-        else:
-            artifact_database[tool_call_id].extend(artifacts)
-    with open("artifact_database.pkl", "wb") as file:
-        pickle.dump(artifact_database, file)
+    tool_call_id: str,
+    artifacts: List[Any],
+    db_path: str | Path = "data/artifacts",
+) -> None:
+    artifact_dir = _tool_artifact_dir(tool_call_id, db_path)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata: dict[str, Any] = {
+        "tool_call_id": tool_call_id,
+        "artifacts": [],
+    }
+    image_index = 0
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            metadata["artifacts"].append({"value": artifact})
+            continue
+
+        stored_artifact: dict[str, Any] = {
+            "summary": artifact.get("summary", ""),
+            "audios": artifact.get("audios", []),
+            "images": [],
+            "raw_images": [],
+        }
+        for key in ("images", "raw_images"):
+            images = artifact.get(key, [])
+            if not isinstance(images, list):
+                continue
+            for image_b64 in images:
+                if not isinstance(image_b64, str):
+                    continue
+                filename = f"{key}_{image_index:04d}.png"
+                _write_image(image_b64, artifact_dir / filename)
+                stored_artifact[key].append(filename)
+                image_index += 1
+        metadata["artifacts"].append(stored_artifact)
+
+    (artifact_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def get_stored_artifacts(
-    tool_call_id: str, db_path="artifact_database.pkl"
+    tool_call_id: str,
+    db_path: str | Path = "data/artifacts",
 ) -> List[Any]:
-    # TODO(boczekbartek): refactor
-    db_path = Path(db_path)
-    if not db_path.is_file():
+    artifact_dir = _tool_artifact_dir(tool_call_id, db_path)
+    metadata_path = artifact_dir / "metadata.json"
+    if not metadata_path.is_file():
         return []
 
-    with db_path.open("rb") as db:
-        artifact_database = pickle.load(db)
-        if tool_call_id in artifact_database:
-            return artifact_database[tool_call_id]
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    restored: list[Any] = []
+    for artifact in metadata.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            restored.append(artifact)
+            continue
+        restored_artifact: dict[str, Any] = {
+            "summary": artifact.get("summary", ""),
+            "audios": artifact.get("audios", []),
+            "images": [],
+            "raw_images": [],
+        }
+        for key in ("images", "raw_images"):
+            for filename in artifact.get(key, []):
+                image_path = artifact_dir / filename
+                if image_path.is_file():
+                    restored_artifact[key].append(_read_image(image_path))
+        restored.append(restored_artifact)
+    return restored
 
-    return []
+
+def store_tool_artifact_record(
+    tool_call_id: str,
+    record: ToolArtifactRecord,
+    db_path: str | Path = "data/artifacts",
+) -> None:
+    store_artifacts(tool_call_id, [record], db_path=db_path)
+
+
+def get_tool_artifact_record(
+    tool_call_id: str,
+    db_path: str | Path = "data/artifacts",
+) -> ToolArtifactRecord | None:
+    records = get_stored_artifacts(tool_call_id, db_path=db_path)
+    if records and isinstance(records[0], dict):
+        return records[0]
+    return None

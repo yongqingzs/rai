@@ -18,9 +18,15 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import streamlit as st
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from rai.agents.integrations.streamlit import get_streamlit_cb, streamlit_invoke
+from rai.frontend.chat_input import render_multimodal_chat_input
+from rai.frontend.multimodal import (
+    collect_multimodal_tool_images,
+    render_human_message,
+    render_image_list,
+)
 from rai.memory.graph import MemoryAgentContext
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.manager import MemoryManager
@@ -28,8 +34,8 @@ from rai.memory.session import (
     delete_session,
     get_latest_session_id,
     get_session_ids,
-    load_thread_state,
     graph_config,
+    load_thread_state,
 )
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
 from rai.messages import HumanMultimodalMessage
@@ -87,14 +93,13 @@ def _format_tool_args(args: Any) -> str:
 def render_chat_messages_with_tools(messages: list):
     """Render checkpointed chat messages, including recoverable tool call details."""
     tool_entries = collect_tool_call_entries(messages)
+    multimodal_tool_images = collect_multimodal_tool_images(messages)
     for index, msg in enumerate(messages):
         if isinstance(msg, HumanMultimodalMessage):
             continue
 
         if isinstance(msg, HumanMessage):
-            if msg.additional_kwargs.get("system_notification"):
-                continue
-            st.chat_message("user").write(msg.content)
+            render_human_message(msg)
             continue
 
         if isinstance(msg, AIMessage):
@@ -111,6 +116,8 @@ def render_chat_messages_with_tools(messages: list):
                             if entry.output is not None:
                                 st.caption("Output")
                                 st.code(entry.output.content, language="json")
+                            images = multimodal_tool_images.get(entry.tool_call_id)
+                            render_image_list(images)
             continue
 
         if isinstance(msg, ToolMessage):
@@ -123,6 +130,7 @@ def render_chat_messages_with_tools(messages: list):
                     with st.expander(f"Tool: {msg.name}", expanded=False):
                         st.caption("Output")
                         st.code(msg.content, language="json")
+                        render_image_list(multimodal_tool_images.get(msg.tool_call_id))
 
 
 def render_memory_sidebar(
@@ -247,11 +255,10 @@ def render_memory_sidebar(
                             item_desc = f"location '{name}'"
                         system_msg = HumanMessage(
                             content=f"[System Notification: The user deleted the long-term {item_desc} from the database via the UI. Please treat it as deleted/forgotten and do not mention or refer to it anymore.]",
-                            additional_kwargs={"system_notification": True}
+                            additional_kwargs={"system_notification": True},
                         )
                         graph.update_state(
-                            graph_config(thread_id),
-                            {"messages": [system_msg]}
+                            graph_config(thread_id), {"messages": [system_msg]}
                         )
                         if "messages" in st.session_state:
                             st.session_state.messages.append(system_msg)
@@ -283,19 +290,20 @@ def render_memory_chat_input(
     namespace: str,
 ):
     """Render chat input and invoke a memory graph for one user turn."""
-    prompt = st.chat_input()
-    if not prompt:
+    submission = render_multimodal_chat_input()
+    if not submission:
         return None
 
-    human_msg = HumanMessage(content=prompt)
+    human_msg = HumanMessage(content=submission.text)
     st.session_state.messages.append(human_msg)
-    st.chat_message("user").write(prompt)
+    st.chat_message("user").write(submission.text)
 
     with st.chat_message("assistant"):
         st_callback = get_streamlit_cb(st.container())
         context = MemoryAgentContext(
             user_id=sidebar_state.user_id,
             namespace=namespace,
+            transient_images=submission.images,
         )
         result = streamlit_invoke(
             graph,

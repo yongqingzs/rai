@@ -13,9 +13,10 @@
 # limitations under the License.
 
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 
-from rai_whoami.tools.vector_db import format_retrieved_documents
-from rai_whoami.vector_db.faiss import split_documents_for_vector_db
+from rai_whoami.tools.vector_db import QueryDatabaseTool, format_retrieved_documents
+from rai_whoami.vector_db.faiss import PrefixedEmbeddings, split_documents_for_vector_db
 
 
 def test_split_documents_for_vector_db_splits_plain_documents():
@@ -83,3 +84,50 @@ def test_format_retrieved_documents_outputs_source_page_and_content():
 
 def test_format_retrieved_documents_handles_empty_results():
     assert format_retrieved_documents([]) == "No matching documents found."
+
+
+def test_keyword_search_prioritizes_exact_markdown_content():
+    tool = QueryDatabaseTool.model_construct(
+        strategy="keyword",
+        keyword_k=2,
+        final_k=2,
+        keyword_documents=[
+            Document(
+                page_content="### 1.1 机身尺寸与重量\n- 底盘长度：435 mm\n- 底盘宽度：330 mm",
+                metadata={"source": "manual.md", "chunk_index": 1},
+            ),
+            Document(
+                page_content="#### 3.2.1 目标坐标系\n导航目标使用 map 坐标系。",
+                metadata={"source": "manual.md", "chunk_index": 2},
+            ),
+        ],
+    )
+
+    results = tool._keyword_search("告诉我机器人的机身尺寸")
+
+    assert results[0].metadata["chunk_index"] == 1
+
+
+class _RecordingEmbeddings(Embeddings):
+    def __init__(self):
+        self.document_texts: list[list[str]] = []
+        self.query_texts: list[str] = []
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.document_texts.append(texts)
+        return [[float(len(text))] for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        self.query_texts.append(text)
+        return [float(len(text))]
+
+
+def test_prefixed_embeddings_adds_search_prefixes():
+    embeddings = _RecordingEmbeddings()
+    wrapped = PrefixedEmbeddings(embeddings)
+
+    wrapped.embed_documents(["hello", "world"])
+    wrapped.embed_query("robot size")
+
+    assert embeddings.document_texts == [["search_document: hello", "search_document: world"]]
+    assert embeddings.query_texts == ["search_query: robot size"]

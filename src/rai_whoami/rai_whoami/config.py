@@ -13,9 +13,20 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 import tomli
+
+
+@dataclass
+class WhoamiRetrievalConfig:
+    strategy: Literal["vector", "keyword", "hybrid"] = "vector"
+    vector_k: int = 4
+    keyword_k: int = 4
+    final_k: int = 4
+    score_threshold: float | None = None
+    normalize_embeddings: bool = False
+    distance_strategy: Literal["l2", "cosine", "inner_product"] = "l2"
 
 
 @dataclass
@@ -24,6 +35,17 @@ class WhoamiConfig:
     root_dir: str = ""
     build_vector_db: bool = False
     k: int = 4
+    retrieval: WhoamiRetrievalConfig | None = None
+
+    def __post_init__(self):
+        if self.retrieval is None:
+            self.retrieval = WhoamiRetrievalConfig(
+                vector_k=self.k,
+                keyword_k=self.k,
+                final_k=self.k,
+            )
+        elif isinstance(self.retrieval, dict):
+            self.retrieval = WhoamiRetrievalConfig(**self.retrieval)
 
 
 def load_whoami_config(config_path: Optional[str] = None) -> WhoamiConfig:

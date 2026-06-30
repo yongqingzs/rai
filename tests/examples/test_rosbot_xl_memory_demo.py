@@ -36,6 +36,7 @@ from rai.memory.graph import MemoryAgentContext, create_memory_react_agent
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.session import delete_session, get_latest_session_id, load_thread_state
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
+from rai.messages import HumanMultimodalMessage
 
 import rai_whoami.tools.robot_docs as robot_docs
 from rai_whoami import WhoamiConfig, create_robot_docs_tool, load_whoami_config
@@ -148,17 +149,31 @@ enabled = true
 root_dir = "docs/robot"
 build_vector_db = true
 k = 7
+
+[whoami.retrieval]
+strategy = "hybrid"
+vector_k = 9
+keyword_k = 5
+final_k = 3
+score_threshold = 0.8
+normalize_embeddings = true
+distance_strategy = "cosine"
 """
     )
 
     config = load_whoami_config(str(config_path))
 
-    assert config == WhoamiConfig(
-        enabled=True,
-        root_dir="docs/robot",
-        build_vector_db=True,
-        k=7,
-    )
+    assert config.enabled is True
+    assert config.root_dir == "docs/robot"
+    assert config.build_vector_db is True
+    assert config.k == 7
+    assert config.retrieval.strategy == "hybrid"
+    assert config.retrieval.vector_k == 9
+    assert config.retrieval.keyword_k == 5
+    assert config.retrieval.final_k == 3
+    assert config.retrieval.score_threshold == 0.8
+    assert config.retrieval.normalize_embeddings is True
+    assert config.retrieval.distance_strategy == "cosine"
 
 
 def test_create_robot_docs_tool_returns_none_when_disabled():
@@ -203,8 +218,22 @@ def test_create_robot_docs_tool_builds_vector_db_when_configured(
             return "source"
 
     class _Builder:
-        def __init__(self, root_dir, embedding=None):
-            calls.append(("builder", root_dir, embedding))
+        def __init__(
+            self,
+            root_dir,
+            embedding=None,
+            distance_strategy="l2",
+            normalize_embeddings=False,
+        ):
+            calls.append(
+                (
+                    "builder",
+                    root_dir,
+                    embedding,
+                    distance_strategy,
+                    normalize_embeddings,
+                )
+            )
 
         def build(self, source):
             calls.append(("build", source))
@@ -222,13 +251,17 @@ def test_create_robot_docs_tool_builds_vector_db_when_configured(
             enabled=True,
             root_dir=str(tmp_path),
             build_vector_db=True,
+            retrieval={
+                "distance_strategy": "cosine",
+                "normalize_embeddings": True,
+            },
         ),
         embeddings_model=None,
     )
 
     assert calls == [
         ("source", tmp_path),
-        ("builder", tmp_path / "generated", None),
+        ("builder", tmp_path / "generated", None, "cosine", True),
         ("build", "source"),
     ]
 
@@ -336,6 +369,46 @@ def test_memory_graph_injects_summary_without_checkpointing_summary_message(
     assert isinstance(llm.calls[-1][0], SystemMessage)
     assert "## Short-Term Memory Summary" in llm.calls[-1][0].content
     assert snapshot.values["summary"] in llm.calls[-1][0].content
+
+
+def test_memory_graph_injects_transient_images_without_checkpointing_them():
+    llm = _RecordingFakeChatModel(responses=["image analyzed"])
+    memory_mgr = _GraphMemoryManager()
+    graph = create_memory_react_agent(
+        memory_mgr=memory_mgr,
+        llm=llm,
+        tools=[],
+        system_prompt_builder=lambda context: "base system prompt",
+    )
+    config = {"configurable": {"thread_id": "transient-image"}}
+    context = MemoryAgentContext(
+        user_id="alice",
+        namespace="default",
+        transient_images=["aW1hZ2UtYnl0ZXM="],
+    )
+
+    graph.invoke(
+        {"messages": [HumanMessage(content="Describe this image")]},
+        config=config,
+        context=context,
+    )
+
+    snapshot = graph.get_state(config)
+    checkpoint_human_messages = [
+        msg for msg in snapshot.values["messages"] if isinstance(msg, HumanMessage)
+    ]
+
+    assert checkpoint_human_messages
+    assert not any(
+        isinstance(msg, HumanMultimodalMessage) for msg in checkpoint_human_messages
+    )
+    assert checkpoint_human_messages[-1].content == "Describe this image"
+
+    model_human_messages = [
+        msg for msg in llm.calls[-1] if isinstance(msg, HumanMessage)
+    ]
+    assert isinstance(model_human_messages[-1], HumanMultimodalMessage)
+    assert model_human_messages[-1].images == ["aW1hZ2UtYnl0ZXM="]
 
 
 def test_collect_tool_call_entries_matches_outputs():
