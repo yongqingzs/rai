@@ -149,17 +149,31 @@ enabled = true
 root_dir = "docs/robot"
 build_vector_db = true
 k = 7
+
+[whoami.retrieval]
+strategy = "hybrid"
+vector_k = 9
+keyword_k = 5
+final_k = 3
+score_threshold = 0.8
+normalize_embeddings = true
+distance_strategy = "cosine"
 """
     )
 
     config = load_whoami_config(str(config_path))
 
-    assert config == WhoamiConfig(
-        enabled=True,
-        root_dir="docs/robot",
-        build_vector_db=True,
-        k=7,
-    )
+    assert config.enabled is True
+    assert config.root_dir == "docs/robot"
+    assert config.build_vector_db is True
+    assert config.k == 7
+    assert config.retrieval.strategy == "hybrid"
+    assert config.retrieval.vector_k == 9
+    assert config.retrieval.keyword_k == 5
+    assert config.retrieval.final_k == 3
+    assert config.retrieval.score_threshold == 0.8
+    assert config.retrieval.normalize_embeddings is True
+    assert config.retrieval.distance_strategy == "cosine"
 
 
 def test_create_robot_docs_tool_returns_none_when_disabled():
@@ -204,8 +218,22 @@ def test_create_robot_docs_tool_builds_vector_db_when_configured(
             return "source"
 
     class _Builder:
-        def __init__(self, root_dir, embedding=None):
-            calls.append(("builder", root_dir, embedding))
+        def __init__(
+            self,
+            root_dir,
+            embedding=None,
+            distance_strategy="l2",
+            normalize_embeddings=False,
+        ):
+            calls.append(
+                (
+                    "builder",
+                    root_dir,
+                    embedding,
+                    distance_strategy,
+                    normalize_embeddings,
+                )
+            )
 
         def build(self, source):
             calls.append(("build", source))
@@ -223,13 +251,17 @@ def test_create_robot_docs_tool_builds_vector_db_when_configured(
             enabled=True,
             root_dir=str(tmp_path),
             build_vector_db=True,
+            retrieval={
+                "distance_strategy": "cosine",
+                "normalize_embeddings": True,
+            },
         ),
         embeddings_model=None,
     )
 
     assert calls == [
         ("source", tmp_path),
-        ("builder", tmp_path / "generated", None),
+        ("builder", tmp_path / "generated", None, "cosine", True),
         ("build", "source"),
     ]
 

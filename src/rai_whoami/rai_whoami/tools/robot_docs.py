@@ -47,11 +47,18 @@ def ensure_vector_db(
     root_dir: str | Path,
     embeddings_model: Embeddings | None = None,
     build_vector_db: bool = False,
+    distance_strategy: str = "l2",
+    normalize_embeddings: bool = False,
 ) -> None:
     root_path = Path(root_dir)
     if build_vector_db:
         source = EmbodimentSource.from_directory(root_path)
-        FAISSBuilder(root_path / "generated", embedding=embeddings_model).build(source)
+        FAISSBuilder(
+            root_path / "generated",
+            embedding=embeddings_model,
+            distance_strategy=distance_strategy,
+            normalize_embeddings=normalize_embeddings,
+        ).build(source)
 
     if not has_vector_db(root_path):
         raise FileNotFoundError(
@@ -72,13 +79,23 @@ def create_robot_docs_tool(
     if not config.root_dir:
         raise ValueError("[whoami] root_dir must be set when enabled = true")
 
+    retrieval = config.retrieval
     ensure_vector_db(
         config.root_dir,
         embeddings_model=embeddings_model,
         build_vector_db=config.build_vector_db,
+        distance_strategy=retrieval.distance_strategy,
+        normalize_embeddings=retrieval.normalize_embeddings,
     )
     return RobotDocsQueryTool(
         root_dir=config.root_dir,
         embeddings_model=embeddings_model,
         k=config.k,
+        strategy=retrieval.strategy,
+        vector_k=retrieval.vector_k,
+        keyword_k=retrieval.keyword_k,
+        final_k=retrieval.final_k,
+        score_threshold=retrieval.score_threshold,
+        distance_strategy=retrieval.distance_strategy,
+        normalize_embeddings=retrieval.normalize_embeddings,
     )
