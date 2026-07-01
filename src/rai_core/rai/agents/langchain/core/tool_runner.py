@@ -76,8 +76,8 @@ class ToolCallGuard:
                 ),
                 "save_location": ToolPolicy(
                     max_calls_per_turn=5,
-                    max_consecutive_calls=2,
-                    block_similar_args=True,
+                    max_consecutive_calls=None,
+                    block_similar_args=False,
                     similar_args_threshold=0.8,
                 ),
                 "forget_memory": ToolPolicy(

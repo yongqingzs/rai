@@ -331,7 +331,9 @@ def get_embeddings_model(
 
         model_config = cast(OpenAIConfig, model_config)
         embeddings = OpenAIEmbeddings(
-            model=model_config.embeddings_model, **_openai_kwargs(model_config)
+            model=model_config.embeddings_model,
+            check_embedding_ctx_length=False,
+            **_openai_kwargs(model_config),
         )
         if return_kwargs:
             c = (
@@ -345,6 +347,7 @@ def get_embeddings_model(
                 "model": model_config.embeddings_model,
                 "base_url": model_config.base_url,
                 "vendor": vendor,
+                "check_embedding_ctx_length": False,
             }
             if model_config.api_key:
                 kwargs["api_key"] = model_config.api_key
