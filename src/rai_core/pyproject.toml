@@ -40,6 +40,8 @@ dependencies = [
     "langfuse>=3.8.0,<4.0.0",
     "pydub>=0.25.1,<0.26.0",
     "streamlit>=1.44,<2.0.0",
+    "rich>=13.7.0,<15.0.0",
+    "prompt_toolkit>=3.0.43,<4.0.0",
     "numpy<2.0",
     "httpx[socks]>=0.28.1",
 ]
