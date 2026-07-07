@@ -32,10 +32,14 @@ from rai.memory.long_term import format_long_term_item, list_long_term_memory_it
 from rai.memory.manager import MemoryManager
 from rai.memory.session import (
     delete_session,
+    delete_session_metadata,
     get_latest_session_id,
     get_session_ids,
     graph_config,
+    list_session_summaries,
     load_thread_state,
+    record_session_activity,
+    session_summary_label,
 )
 from rai.memory.users import add_user_profile, delete_user, get_user_ids
 from rai.messages import HumanMultimodalMessage
@@ -142,6 +146,11 @@ def render_memory_sidebar(
     """Render reusable Streamlit controls for memory session/user management."""
     st.sidebar.subheader("Short-Term Memory")
     session_ids = get_session_ids(memory_mgr)
+    session_summaries = list_session_summaries(memory_mgr, graph, namespace)
+    session_label_by_id = {
+        summary.thread_id: session_summary_label(summary)
+        for summary in session_summaries
+    }
     latest_session_id = get_latest_session_id(memory_mgr)
     if not session_ids:
         st.sidebar.info("No sessions yet. Start a conversation.")
@@ -161,6 +170,9 @@ def render_memory_sidebar(
         "Session (Thread)",
         options=session_options,
         index=default_index,
+        format_func=lambda option: "(new session)"
+        if option == "(new session)"
+        else session_label_by_id.get(option, option),
         help="Different sessions keep separate conversation history.",
     )
 
@@ -178,6 +190,7 @@ def render_memory_sidebar(
     can_delete_session = thread_id in session_ids
     if st.sidebar.button("Delete Session", disabled=not can_delete_session):
         delete_session(memory_mgr, thread_id)
+        delete_session_metadata(memory_mgr, namespace, thread_id)
         st.session_state.pop("messages", None)
         st.session_state.pop("summary", None)
         st.session_state.pop("_last_thread", None)
@@ -297,6 +310,15 @@ def render_memory_chat_input(
     human_msg = HumanMessage(content=submission.text)
     st.session_state.messages.append(human_msg)
     st.chat_message("user").write(submission.text)
+    memory_mgr = st.session_state.get("memory_mgr")
+    if memory_mgr is not None:
+        record_session_activity(
+            memory_mgr=memory_mgr,
+            namespace=namespace,
+            thread_id=sidebar_state.thread_id,
+            first_user_message=submission.text,
+            message_count=len(st.session_state.messages),
+        )
 
     with st.chat_message("assistant"):
         st_callback = get_streamlit_cb(st.container())
@@ -316,5 +338,12 @@ def render_memory_chat_input(
         if result and "messages" in result:
             st.session_state.messages = result["messages"]
             st.session_state["summary"] = result.get("summary", "")
+            if memory_mgr is not None:
+                record_session_activity(
+                    memory_mgr=memory_mgr,
+                    namespace=namespace,
+                    thread_id=sidebar_state.thread_id,
+                    message_count=len(st.session_state.messages),
+                )
             st.rerun()
         return result

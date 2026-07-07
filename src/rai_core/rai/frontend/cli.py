@@ -11,10 +11,14 @@ from rai.memory.graph import MemoryAgentContext
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.manager import MemoryManager
 from rai.memory.session import (
+    SessionSummary,
     delete_session,
+    delete_session_metadata,
     get_session_ids,
     graph_config,
+    list_session_summaries,
     load_thread_state,
+    record_session_activity,
 )
 from rai.memory.users import delete_user, get_user_ids
 from rai.messages import preprocess_image
@@ -106,6 +110,7 @@ class MemoryCliSession:
         self.thread_id = f"session-{int(time.time())}"
         self.messages = [self.welcome_message_factory()]
         self.summary = ""
+        record_session_activity(self.memory_mgr, self.namespace, self.thread_id)
         return self.thread_id
 
     def resume_session(self, thread_id: str) -> list[Any]:
@@ -116,8 +121,12 @@ class MemoryCliSession:
     def list_sessions(self) -> list[str]:
         return get_session_ids(self.memory_mgr)
 
+    def list_session_summaries(self) -> list[SessionSummary]:
+        return list_session_summaries(self.memory_mgr, self.graph, self.namespace)
+
     def delete_session(self, thread_id: str) -> str:
         delete_session(self.memory_mgr, thread_id)
+        delete_session_metadata(self.memory_mgr, self.namespace, thread_id)
         if thread_id == self.thread_id:
             new_thread_id = self.new_session()
             return f"Deleted current session {thread_id}; started {new_thread_id}."
@@ -194,6 +203,13 @@ class MemoryCliSession:
     def invoke(self, turn: CliTurn) -> list[Any]:
         human_msg = HumanMessage(content=turn.text)
         transient_images = encode_image_paths(turn.images)
+        record_session_activity(
+            self.memory_mgr,
+            self.namespace,
+            self.thread_id,
+            first_user_message=turn.text,
+            message_count=len(self.messages) + 1,
+        )
         context = MemoryAgentContext(
             user_id=self.user_id,
             namespace=self.namespace,
@@ -213,6 +229,12 @@ class MemoryCliSession:
         if result and "messages" in result:
             self.messages = result["messages"]
             self.summary = result.get("summary", "")
+            record_session_activity(
+                self.memory_mgr,
+                self.namespace,
+                self.thread_id,
+                message_count=len(self.messages),
+            )
         return self.messages[old_count:]
 
 
@@ -396,15 +418,34 @@ class CliRenderer:
             Panel(text, title=f"Tool result: {name}", border_style="magenta")
         )
 
-    def sessions(self, session_ids: Sequence[str], current_thread_id: str) -> None:
+    def sessions(
+        self,
+        session_summaries: Sequence[SessionSummary],
+        current_thread_id: str,
+    ) -> None:
         if self.console is None or Table is None:
-            print("\n".join(session_ids) if session_ids else "No sessions.")
+            if not session_summaries:
+                print("No sessions.")
+                return
+            for summary in session_summaries:
+                marker = "*" if summary.thread_id == current_thread_id else " "
+                print(
+                    f"{marker} {summary.created_at_display} | "
+                    f"{summary.first_user_message or '(empty)'} | {summary.thread_id}"
+                )
             return
         table = Table(title="Sessions")
-        table.add_column("Thread ID")
         table.add_column("Current")
-        for thread_id in session_ids:
-            table.add_row(thread_id, "*" if thread_id == current_thread_id else "")
+        table.add_column("Created")
+        table.add_column("First message")
+        table.add_column("Thread ID")
+        for summary in session_summaries:
+            table.add_row(
+                "*" if summary.thread_id == current_thread_id else "",
+                summary.created_at_display,
+                summary.first_user_message or "(empty)",
+                summary.thread_id,
+            )
         self.console.print(table)
 
     def help(self) -> None:
@@ -581,7 +622,7 @@ def _handle_command(
         renderer.system(session.export_session(path))
         return
     if command.message == "sessions":
-        renderer.sessions(session.list_sessions(), session.thread_id)
+        renderer.sessions(session.list_session_summaries(), session.thread_id)
         return
     if command.message and command.message.startswith("resume:"):
         resume_value = command.message.removeprefix("resume:")

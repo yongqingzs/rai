@@ -51,6 +51,12 @@ class _FakeStore:
             return [
                 SimpleNamespace(key="operator", value={"user_id": "operator"}),
             ]
+        if schema == "metadata":
+            return [
+                SimpleNamespace(key=key, value=value)
+                for namespace, key, value in self.puts
+                if namespace[-1] == "metadata"
+            ][:limit]
         if schema == "facts":
             return [
                 SimpleNamespace(key="fact-1", value={"text": "inspect point1 first"})
@@ -75,6 +81,12 @@ class _FakeStore:
 
     def put(self, namespace, key, value):
         self.puts.append((namespace, key, value))
+
+    def get(self, namespace, key):
+        for stored_namespace, stored_key, value in reversed(self.puts):
+            if stored_namespace == namespace and stored_key == key:
+                return SimpleNamespace(key=key, value=value)
+        return None
 
 
 class _FakeGraph:
@@ -169,7 +181,7 @@ def test_memory_cli_session_invokes_graph_with_context_and_thread_id(tmp_path):
         graph=graph,
         namespace="inspection",
         user_id="operator",
-        thread_id="thread-1",
+        thread_id="session-a",
     )
 
     new_messages = session.invoke(CliTurn(text="hello", images=[str(image_path)]))
@@ -178,12 +190,15 @@ def test_memory_cli_session_invokes_graph_with_context_and_thread_id(tmp_path):
     assert new_messages[0].content == "answer"
     call = graph.calls[0]
     assert call["input"]["messages"][0].content == "hello"
-    assert call["config"]["configurable"]["thread_id"] == "thread-1"
+    assert call["config"]["configurable"]["thread_id"] == "session-a"
     assert call["context"].user_id == "operator"
     assert call["context"].namespace == "inspection"
     assert len(call["context"].transient_images) == 1
     assert call["context"].transient_images[0] != str(image_path)
     assert session.summary == "summary"
+    summaries = session.list_session_summaries()
+    assert summaries[0].thread_id == "session-a"
+    assert summaries[0].first_user_message == "hello"
 
 
 def test_memory_cli_session_user_switch_rebuilds_graph():
@@ -272,7 +287,10 @@ def test_memory_cli_session_deletes_session_and_memory():
     assert session_message == "Deleted session session-b."
     assert memory_mgr.checkpointer.deleted_threads == ["session-b"]
     assert memory_message == "Deleted spatial memory key=point1 for user=operator."
-    assert memory_mgr.store.deleted == [(("inspection", "operator", "spatial"), "point1")]
+    assert memory_mgr.store.deleted == [
+        (("inspection", "__sessions__", "metadata"), "session-b"),
+        (("inspection", "operator", "spatial"), "point1"),
+    ]
 
 
 def test_memory_cli_session_deletes_user_and_switches_current_user_to_default():
