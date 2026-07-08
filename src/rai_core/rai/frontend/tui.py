@@ -12,6 +12,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.message import Message
+from textual.theme import Theme
 from textual.widgets import Header, Markdown, Static, TextArea
 
 from rai.frontend.cli import (
@@ -24,6 +25,32 @@ from rai.frontend.cli import (
 )
 from rai.memory.long_term import format_long_term_item
 from rai.memory.session import SessionSummary
+
+RAI_AGENT_THEME = Theme(
+    name="rai_agent_dark",
+    primary="#8fb3c8",
+    secondary="#6f8796",
+    accent="#7bb7a7",
+    foreground="#d7dde2",
+    background="#0d1114",
+    surface="#141a1f",
+    panel="#192127",
+    boost="#202a31",
+    success="#86c39a",
+    warning="#d7b46a",
+    error="#d06f6f",
+    dark=True,
+    variables={
+        "block-cursor-text-style": "none",
+        "input-cursor-background": "#c8d5dc",
+        "input-cursor-foreground": "#0d1114",
+        "input-selection-background": "#355263 70%",
+        "scrollbar": "#29343c",
+        "scrollbar-hover": "#35434d",
+        "scrollbar-active": "#50616d",
+        "scrollbar-background": "#101519",
+    },
+)
 
 
 class ChatTextArea(TextArea):
@@ -84,20 +111,24 @@ class MemoryTuiApp(App):
     CSS = """
     Screen {
         layout: vertical;
+        background: #0d1114;
+        color: #d7dde2;
     }
 
     #conversation {
         height: 1fr;
-        border: solid $primary;
-        padding: 1 2;
-        background: $surface;
+        border: tall #27323a;
+        padding: 1 1;
+        background: #0d1114;
     }
 
     #command_panel {
         height: auto;
         max-height: 12;
         padding: 0 1;
-        border: round $accent;
+        border: round #44525c;
+        background: #182027;
+        color: #d7dde2;
     }
 
     #command_panel.hidden {
@@ -108,54 +139,92 @@ class MemoryTuiApp(App):
         height: auto;
         min-height: 1;
         max-height: 6;
-        border: round $accent;
-        background: $panel;
+        border: tall #34424b;
+        background: #11171b;
+        color: #dde4e8;
+    }
+
+    ChatTextArea:focus {
+        border: tall #6f9eb4;
+        background: #131b20;
+    }
+
+    ChatTextArea .text-area--cursor {
+        background: #c8d5dc;
+        color: #0d1114;
+        text-style: none;
+    }
+
+    ChatTextArea .text-area--selection {
+        background: #355263 70%;
+    }
+
+    ChatTextArea .text-area--cursor-line {
+        background: #182128;
+    }
+
+    ChatTextArea .text-area--placeholder {
+        color: #70808a;
     }
 
     .message {
         width: 100%;
-        margin: 0 0 1 0;
+        margin: 1 0 1 0;
         padding: 1 2;
-        border: round $surface-lighten-2;
-        background: $panel;
+        border: round #2f3a42;
+        background: #182027;
+        color: #d7dde2;
     }
 
     .message.user {
-        color: $text;
-        border: round $accent;
-        background: $boost;
+        color: #e6edf1;
+        border-left: solid #6f8796;
+        border-top: solid #2f3a42;
+        border-right: solid #2f3a42;
+        border-bottom: solid #2f3a42;
+        background: #171f26;
     }
 
     .message.assistant {
-        color: $text;
-        border: round $primary;
-        background: $panel;
+        color: #d7dde2;
+        border-left: solid #7bb7a7;
+        border-top: solid #334048;
+        border-right: solid #334048;
+        border-bottom: solid #334048;
+        background: #1b242b;
     }
 
     .message.system {
-        color: $text-muted;
-        border: round $surface-lighten-1;
-        background: $surface-lighten-1;
+        color: #8f9ba4;
+        border-left: solid #34424b;
+        border-top: solid #283138;
+        border-right: solid #283138;
+        border-bottom: solid #283138;
+        background: #141a1f;
     }
 
     .message.tool {
-        color: $warning;
-        border: round $warning;
-        background: $surface-lighten-1;
+        color: #c8b47e;
+        border-left: solid #6b6041;
+        border-top: solid #3b382a;
+        border-right: solid #3b382a;
+        border-bottom: solid #3b382a;
+        background: #1c211d;
     }
 
     .message.activity {
-        color: $text-muted;
+        color: #7f8c95;
         margin: 0 0 1 0;
         padding: 0 1;
         border: none;
-        background: $surface;
+        background: #0d1114;
     }
 
     #agent_status {
         height: 1;
         padding: 0 1;
-        color: $text-muted;
+        background: #0d1114;
+        color: #7f8c95;
     }
     """
 
@@ -191,6 +260,8 @@ class MemoryTuiApp(App):
         yield Static(self._status_text(), id="agent_status")
 
     def on_mount(self) -> None:
+        self.register_theme(RAI_AGENT_THEME)
+        self.theme = RAI_AGENT_THEME.name
         self._write_conversation_system(
             "RAI TUI started. Use /help for commands, /resume to choose a session."
         )

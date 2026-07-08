@@ -10,7 +10,7 @@ from rai.frontend.cli import (
     parse_cli_input,
     shutdown_tool_connectors,
 )
-from rai.frontend.tui import ChatTextArea, MemoryTuiApp
+from rai.frontend.tui import RAI_AGENT_THEME, ChatTextArea, MemoryTuiApp
 from textual import events
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
@@ -532,6 +532,39 @@ def test_memory_tui_app_has_inline_activity_layout():
             assert not isinstance(conversation, RichLog)
             child_ids = [getattr(child, "id", None) for child in app.screen.children]
             assert child_ids.index("input") < child_ids.index("agent_status")
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_uses_neutral_agent_theme():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test():
+            assert app.theme == RAI_AGENT_THEME.name
+            assert "ChatTextArea {\n        height: auto;" in app.CSS
+            assert (
+                "ChatTextArea {\n        height: auto;\n        min-height: 1;\n        max-height: 6;\n        border: tall #34424b;"
+                in app.CSS
+            )
+            assert "ChatTextArea:focus" in app.CSS
+            chat_text_area_css = app.CSS.split("ChatTextArea {", maxsplit=1)[1].split(
+                "}", maxsplit=1
+            )[0]
+            assert "$accent" not in chat_text_area_css
+            assert "$warning" not in chat_text_area_css
+            assert "$error" not in chat_text_area_css
+            message_css = app.CSS.split(".message {", maxsplit=1)[1]
+            assert "#11171b" not in message_css
+            assert "#131a1f" not in message_css
+            assert "border: round #2f3a42;" in app.CSS
+            assert "border-right: solid #334048;" in app.CSS
 
     asyncio.run(run_test())
 
