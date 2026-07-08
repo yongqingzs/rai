@@ -591,29 +591,47 @@ def _langchain_event_to_cli_events(event: dict[str, Any]) -> list[CliAgentEvent]
                 "on_chain_stream": "running",
                 "on_chain_end": "done",
             }[event_type]
-            events.append(CliAgentEvent(kind="status", status=f"step: {name} {phase}"))
+            events.append(
+                CliAgentEvent(kind="status", status=f"step: {name} {phase}", data=event)
+            )
     elif event_type in {"on_chat_model_start", "on_llm_start"}:
         events.append(
-            CliAgentEvent(kind="status", status=f"model: connecting ({name})")
+            CliAgentEvent(
+                kind="status", status=f"model: connecting ({name})", data=event
+            )
         )
     elif event_type in {"on_chat_model_stream", "on_llm_stream"}:
-        events.append(CliAgentEvent(kind="status", status=f"model: receiving ({name})"))
+        events.append(
+            CliAgentEvent(
+                kind="status", status=f"model: receiving ({name})", data=event
+            )
+        )
     elif event_type in {"on_chat_model_end", "on_llm_end"}:
-        events.append(CliAgentEvent(kind="status", status=f"model: complete ({name})"))
+        events.append(
+            CliAgentEvent(kind="status", status=f"model: complete ({name})", data=event)
+        )
         output = data.get("output")
         if output is not None and hasattr(output, "content"):
             events.append(CliAgentEvent(kind="message", message=output))
     elif event_type in {"on_chat_model_error", "on_llm_error"}:
-        events.append(CliAgentEvent(kind="status", status=f"model: error ({name})"))
+        events.append(
+            CliAgentEvent(kind="status", status=f"model: error ({name})", data=event)
+        )
     elif event_type == "on_tool_start":
-        events.append(CliAgentEvent(kind="status", status=f"tool: {name} starting"))
+        events.append(
+            CliAgentEvent(kind="status", status=f"tool: {name} starting", data=event)
+        )
     elif event_type == "on_tool_end":
-        events.append(CliAgentEvent(kind="status", status=f"tool: {name} done"))
+        events.append(
+            CliAgentEvent(kind="status", status=f"tool: {name} done", data=event)
+        )
         output = data.get("output")
         if output is not None and hasattr(output, "content"):
             events.append(CliAgentEvent(kind="message", message=output))
     elif event_type == "on_tool_error":
-        events.append(CliAgentEvent(kind="status", status=f"tool: {name} error"))
+        events.append(
+            CliAgentEvent(kind="status", status=f"tool: {name} error", data=event)
+        )
 
     return events
 

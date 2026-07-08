@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any, Iterable
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -182,6 +184,7 @@ class MemoryTuiApp(App):
         border-top: solid #2f3a42;
         border-right: solid #2f3a42;
         border-bottom: solid #2f3a42;
+        border-title-color: #9ed0ff;
         background: #171f26;
     }
 
@@ -191,6 +194,7 @@ class MemoryTuiApp(App):
         border-top: solid #334048;
         border-right: solid #334048;
         border-bottom: solid #334048;
+        border-title-color: #8fe3c2;
         background: #1b242b;
     }
 
@@ -249,6 +253,11 @@ class MemoryTuiApp(App):
         self._session_picker_index = 0
         self._last_assistant_text = ""
         self._last_activity_status = ""
+        self._turn_started_at: float | None = None
+        self._turn_timer: Any | None = None
+        self._working_widget: Static | None = None
+        self._working_transcript_index: int | None = None
+        self._tool_activity_widgets: dict[str, tuple[Static, str]] = {}
         self._transcript: list[str] = []
         self.log_path = Path(log_path).expanduser() if log_path is not None else None
 
@@ -388,7 +397,7 @@ class MemoryTuiApp(App):
 
     def _submit_turn(self, turn: CliTurn) -> None:
         self._write_user(turn.text)
-        self._refresh_status("running")
+        self._start_turn_timeline()
         self._run_agent(turn)
 
     @work(thread=True)
@@ -401,20 +410,18 @@ class MemoryTuiApp(App):
                 self._write_conversation_system,
                 f"Agent invocation failed: {type(e).__name__}: {e}",
             )
-            self.call_from_thread(self._refresh_status, "error")
+            self.call_from_thread(self._finish_turn_timeline, False)
 
     def _handle_agent_event(self, event: CliAgentEvent) -> None:
         if event.kind == "status":
-            if event.status:
-                self._write_activity(event.status)
-            self._refresh_status(event.status or "running")
+            self._handle_status_event(event)
+            self._refresh_status(self._agent_status_label(event.status))
             return
         if event.kind == "message" and event.message is not None:
             self._write_messages([event.message])
             return
         if event.kind == "done":
-            self._write_activity("agent: done")
-            self._refresh_status("idle")
+            self._finish_turn_timeline(True)
             return
 
     def _write_messages(self, messages: Iterable[Any]) -> None:
@@ -559,11 +566,23 @@ class MemoryTuiApp(App):
         self._append_log("assistant", message)
 
     def _write_tool_call(self, name: str, args: Any) -> None:
-        self._append_message("tool", f"Tool call: {name}\n{_format_json(args)}")
+        args_summary = self._summarize_value(args)
+        text = f"• Tool call {name}"
+        if args_summary:
+            text = f"{text}\n  └ {args_summary}"
+        self._append_message(
+            "tool", text, self._timeline_text("Tool call", name, args_summary)
+        )
         self._append_log("tool call", f"{name}\n{_format_json(args)}")
 
     def _write_tool_result(self, name: str, content: Any) -> None:
-        self._append_message("tool", f"Tool result: {name}\n{content}")
+        result_summary = self._summarize_value(content)
+        text = f"• Tool result {name}"
+        if result_summary:
+            text = f"{text}\n  └ {result_summary}"
+        self._append_message(
+            "tool", text, self._timeline_text("Tool result", name, result_summary)
+        )
         self._append_log("tool result", f"{name}\n{content}")
 
     def _copy_last_assistant_message(self) -> None:
@@ -594,25 +613,36 @@ class MemoryTuiApp(App):
         with self.log_path.open("a", encoding="utf-8") as file:
             file.write(f"\n\n## {role} - {timestamp}\n\n{content}\n")
 
-    def _write_activity(self, message: str) -> None:
+    def _write_activity(self, message: str, renderable: Any | None = None) -> None:
         if message == self._last_activity_status:
             return
         self._last_activity_status = message
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self._append_message("activity", f"{timestamp} {message}")
+        self._append_message("activity", message, renderable)
         self._append_log("activity", message)
 
-    def _append_message(self, role: str, text: str) -> None:
+    def _append_message(
+        self, role: str, text: str, renderable: Any | None = None
+    ) -> Static | Markdown:
         self._transcript.append(text)
-        self._conversation().mount(self._message_widget(role, text))
+        widget = self._message_widget(role, text, renderable)
+        self._conversation().mount(widget)
+        self._move_working_activity_to_end(after=widget)
         self._scroll_conversation_end()
+        return widget
 
-    def _message_widget(self, role: str, text: str) -> Static | Markdown:
+    def _message_widget(
+        self, role: str, text: str, renderable: Any | None = None
+    ) -> Static | Markdown:
+        if renderable is not None:
+            return Static(renderable, classes=f"message {role}")
         widget: Static | Markdown
+        title, _, body = text.partition("\n")
         if role == "assistant":
-            widget = Markdown(
-                self._as_markdown_message(text), classes=f"message {role}"
-            )
+            widget = Markdown(body or text, classes=f"message {role}")
+            widget.border_title = f" {title} " if body else ""
+        elif role == "user":
+            widget = Static(body or text, classes=f"message {role}")
+            widget.border_title = f" {title} " if body else ""
         else:
             widget = Static(text, classes=f"message {role}")
         return widget
@@ -661,6 +691,192 @@ class MemoryTuiApp(App):
         conversation.scroll_end(animate=False, immediate=True, force=True)
         conversation.set_scroll(None, conversation.max_scroll_y)
 
+    def _start_turn_timeline(self) -> None:
+        self._turn_started_at = monotonic()
+        self._stop_turn_timer()
+        self._tool_activity_widgets.clear()
+        text = "• Working (0s)"
+        self._working_transcript_index = len(self._transcript)
+        self._working_widget = self._append_message(
+            "activity",
+            text,
+            self._timeline_text("Working", "(0s)", style="#8fb3c8"),
+        )
+        self._append_log("activity", text)
+        self._turn_timer = self.set_interval(
+            1.0, self._refresh_working_status, name="turn-elapsed"
+        )
+
+    def _finish_turn_timeline(self, succeeded: bool) -> None:
+        elapsed = self._turn_elapsed_text()
+        self._stop_turn_timer()
+        if succeeded:
+            text = f"• Worked for {elapsed}"
+            renderable = self._timeline_text("Worked for", elapsed, style="#86c39a")
+            self._refresh_status("idle")
+        else:
+            text = f"• Failed after {elapsed}"
+            renderable = self._timeline_text("Failed after", elapsed, style="#d06f6f")
+            self._refresh_status("error")
+        self._update_working_activity(text, renderable)
+        self._append_log("activity", text)
+        self._turn_started_at = None
+        self._working_widget = None
+        self._working_transcript_index = None
+
+    def _refresh_working_status(self) -> None:
+        if self._turn_started_at is not None:
+            elapsed = self._turn_elapsed_text()
+            text = f"• Working ({elapsed})"
+            self._update_working_activity(
+                text, self._timeline_text("Working", f"({elapsed})", style="#8fb3c8")
+            )
+
+    def _stop_turn_timer(self) -> None:
+        if self._turn_timer is not None:
+            self._turn_timer.stop()
+            self._turn_timer = None
+
+    def _turn_elapsed_text(self) -> str:
+        if self._turn_started_at is None:
+            return "0s"
+        return _format_duration(monotonic() - self._turn_started_at)
+
+    def _agent_status_label(self, status: str) -> str:
+        if not status:
+            return "Working"
+        if status.startswith("model: error"):
+            return "Model error"
+        if status.startswith("model:"):
+            return "Thinking"
+        if status.startswith("tool: "):
+            tool_name = status.removeprefix("tool: ").rsplit(" ", maxsplit=1)[0]
+            if status.endswith("starting"):
+                return f"Running {tool_name}"
+            if status.endswith("error"):
+                return f"Tool error: {tool_name}"
+            return f"Tool complete: {tool_name}"
+        if status.startswith("step:") or status in {"agent: starting", "starting"}:
+            return "Working"
+        return status
+
+    def _handle_status_event(self, event: CliAgentEvent) -> None:
+        status = event.status
+        if not status.startswith("tool: "):
+            return
+        tool_name = status.removeprefix("tool: ").rsplit(" ", maxsplit=1)[0]
+        event_data = event.data if isinstance(event.data, dict) else {}
+        tool_key = str(event_data.get("run_id") or tool_name)
+        payload = (
+            event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
+        )
+        if status.endswith("starting"):
+            self._start_tool_activity(tool_key, tool_name, payload.get("input"))
+        elif status.endswith("done"):
+            self._finish_tool_activity(tool_key, tool_name, payload.get("output"), True)
+        elif status.endswith("error"):
+            self._finish_tool_activity(tool_key, tool_name, payload.get("error"), False)
+
+    def _start_tool_activity(self, tool_key: str, name: str, args: Any) -> None:
+        summary = self._summarize_value(args)
+        text = f"• Running {name}"
+        if summary:
+            text = f"{text}\n  └ {summary}"
+        widget = self._append_message(
+            "activity", text, self._timeline_text("Running", name, summary)
+        )
+        if isinstance(widget, Static):
+            self._tool_activity_widgets[tool_key] = (widget, text)
+            self._tool_activity_widgets[name] = (widget, text)
+        self._append_log("activity", text)
+
+    def _finish_tool_activity(
+        self, tool_key: str, name: str, result: Any, succeeded: bool
+    ) -> None:
+        summary = self._summarize_value(result)
+        action = "Ran" if succeeded else "Tool failed"
+        style = "#86c39a" if succeeded else "#d06f6f"
+        text = f"• {action} {name}"
+        if summary:
+            text = f"{text}\n  └ {summary}"
+        renderable = self._timeline_text(action, name, summary, style=style)
+        existing = self._tool_activity_widgets.pop(
+            tool_key, self._tool_activity_widgets.pop(name, None)
+        )
+        if existing is None:
+            self._append_message("activity", text, renderable)
+        else:
+            widget, old_text = existing
+            self._tool_activity_widgets.pop(tool_key, None)
+            self._tool_activity_widgets.pop(name, None)
+            widget.update(renderable)
+            if old_text in self._transcript:
+                self._transcript[self._transcript.index(old_text)] = text
+            else:
+                self._transcript.append(text)
+        self._append_log("activity", text)
+
+    def _update_working_activity(self, text: str, renderable: Text) -> None:
+        if self._working_widget is None or self._working_transcript_index is None:
+            self._working_transcript_index = len(self._transcript)
+            self._working_widget = self._append_message("activity", text, renderable)
+            return
+        self._working_widget.update(renderable)
+        self._transcript[self._working_transcript_index] = text
+        self._move_working_activity_to_end()
+        self._scroll_conversation_end()
+        self.call_after_refresh(self._scroll_conversation_end)
+
+    def _move_working_activity_to_end(
+        self, after: Static | Markdown | None = None
+    ) -> None:
+        if self._working_widget is None or self._working_transcript_index is None:
+            return
+        if after is self._working_widget:
+            return
+        conversation = self._conversation()
+        if conversation.children and conversation.children[-1] is self._working_widget:
+            return
+        try:
+            conversation.move_child(
+                self._working_widget,
+                after=after if after is not None else len(conversation.children) - 1,
+            )
+        except ValueError:
+            return
+        working_text = self._transcript.pop(self._working_transcript_index)
+        self._transcript.append(working_text)
+        self._working_transcript_index = len(self._transcript) - 1
+
+    def _timeline_text(
+        self,
+        action: str,
+        target: str = "",
+        detail: str = "",
+        *,
+        style: str = "#7f8c95",
+    ) -> Text:
+        text = Text("• ", style="#6f8796")
+        text.append(action, style=style)
+        if target:
+            text.append(f" {target}", style="#d7dde2")
+        if detail:
+            text.append("\n  └ ", style="#6f8796")
+            text.append(detail, style="#8f9ba4")
+        return text
+
+    def _summarize_value(self, value: Any, limit: int = 180) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            summary = value
+        else:
+            summary = _format_json(value)
+        summary = " ".join(summary.split())
+        if len(summary) > limit:
+            return f"{summary[: limit - 1]}…"
+        return summary
+
     def _as_markdown_message(self, text: str) -> str:
         title, _, body = text.partition("\n")
         if not body:
@@ -674,8 +890,8 @@ class MemoryTuiApp(App):
 
     def _status_text(self) -> str:
         return (
-            f"{self._status} | user={self.session.user_id} | "
-            f"namespace={self.session.namespace} | thread={self.session.thread_id} | "
+            f"user={self.session.user_id} | namespace={self.session.namespace} | "
+            f"thread={self.session.thread_id} | "
             "Enter send | Shift+Enter newline | Ctrl+C clear/exit | /resume"
         )
 
@@ -701,3 +917,14 @@ def run_memory_tui(
         session,
         log_path=default_tui_log_path(session) if log_path is None else log_path,
     ).run()
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"

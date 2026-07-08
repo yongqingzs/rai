@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from PIL import Image
 from rai.frontend.cli import (
     CliAgentEvent,
@@ -141,6 +141,59 @@ class _FakeUnsupportedAsyncEventsGraph(_FakeStreamingGraph):
         self.calls.append(kwargs)
         raise NotImplementedError("The SqliteSaver doesn't support async methods")
         yield  # pragma: no cover
+
+
+class _FakeToolStreamingGraph(_FakeGraph):
+    def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        messages = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "inspect_area",
+                        "args": {"target": "point1", "mode": "thermal"},
+                        "id": "call-1",
+                    }
+                ],
+            ),
+            ToolMessage(
+                content='{"status": "ok", "temperature": 36.5}',
+                name="inspect_area",
+                tool_call_id="call-1",
+            ),
+            AIMessage(content="inspection complete"),
+        ]
+        self.messages = [*self.messages, *messages]
+        yield {"agent": {"messages": messages}}
+
+
+class _FakeToolEventsGraph(_FakeGraph):
+    async def astream_events(self, **kwargs):
+        self.calls.append(kwargs)
+        tool_message = ToolMessage(
+            content='{"status": "ok", "temperature": 36.5}',
+            name="inspect_area",
+            tool_call_id="call-1",
+        )
+        self.messages = [*self.messages, tool_message, AIMessage(content="done")]
+        yield {
+            "event": "on_tool_start",
+            "name": "inspect_area",
+            "run_id": "tool-run-1",
+            "data": {"input": {"target": "point1"}},
+        }
+        yield {
+            "event": "on_tool_end",
+            "name": "inspect_area",
+            "run_id": "tool-run-1",
+            "data": {"output": tool_message},
+        }
+        yield {
+            "event": "on_chat_model_end",
+            "name": "ChatOpenAI",
+            "data": {"output": AIMessage(content="done", id="tool-events-ai")},
+        }
 
 
 def test_parse_cli_input_handles_commands_and_image_turn():
@@ -297,6 +350,11 @@ def test_memory_cli_session_streams_langchain_events():
     assert "model: connecting (ChatOpenAI)" in statuses
     assert "model: receiving (ChatOpenAI)" in statuses
     assert "model: complete (ChatOpenAI)" in statuses
+    assert all(
+        event.data
+        for event in events
+        if event.kind == "status" and event.status != "agent: starting"
+    )
     assert [event.message.content for event in events if event.kind == "message"] == [
         "event answer"
     ]
@@ -638,7 +696,27 @@ def test_memory_tui_app_renders_assistant_as_markdown_message():
             app._write_assistant("answer")
             assistant_message = app.query(".message.assistant").last()
             assert isinstance(assistant_message, Markdown)
+            assert assistant_message.border_title == " Assistant "
             assert "Assistant\nanswer" in app._transcript
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_renders_user_role_title():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test():
+            app._write_user("hello")
+            user_message = app.query(".message.user").last()
+            assert user_message.border_title == " User "
+            assert "User\nhello" in app._transcript
 
     asyncio.run(run_test())
 
@@ -686,6 +764,105 @@ def test_memory_tui_app_copy_transcript_copies_plain_text():
             assert copied
             assert "User\nhello" in copied[-1]
             assert "Assistant\nanswer" in copied[-1]
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_renders_codex_style_agent_timeline():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeAsyncEventsGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press("h", "e", "l", "l", "o", "enter")
+            for _ in range(5):
+                await pilot.pause()
+            transcript = "\n".join(app._transcript)
+            assert "• Worked for" in transcript
+            assert "enrich_prompt" not in transcript
+            assert "model: receiving" not in transcript
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_updates_working_timeline_in_place():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test():
+            app._start_turn_timeline()
+            assert "• Working (0s)" in app._transcript
+            assert "Working" not in app._status_text()
+            app._write_assistant("answer while working")
+            assert app._transcript[-1] == "• Working (0s)"
+            app._turn_started_at = app._turn_started_at - 65
+            app._refresh_working_status()
+            assert app._transcript[-1] == "• Working (1m 05s)"
+            assert "• Working (0s)" not in app._transcript
+            assert "Working" not in app._status_text()
+            app._finish_turn_timeline(True)
+            assert app._transcript[-1] == "• Worked for 1m 05s"
+            assert all("• Working" not in item for item in app._transcript)
+            conversation = app.query_one("#conversation", VerticalScroll)
+            assert conversation.is_vertical_scroll_end
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_renders_final_tool_messages_without_running_state():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeToolStreamingGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press("i", "n", "s", "p", "e", "c", "t", "enter")
+            for _ in range(5):
+                await pilot.pause()
+            transcript = "\n".join(app._transcript)
+            assert "• Tool call inspect_area" in transcript
+            assert '└ { "target": "point1", "mode": "thermal" }' in transcript
+            assert "• Tool result inspect_area" in transcript
+            assert "• Running inspect_area" not in transcript
+            assert "• Ran inspect_area" not in transcript
+            assert "temperature" in transcript
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_renders_realtime_tool_events_as_running_then_ran():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeToolEventsGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press("i", "n", "s", "p", "e", "c", "t", "enter")
+            for _ in range(5):
+                await pilot.pause()
+            transcript = "\n".join(app._transcript)
+            assert "• Ran inspect_area" in transcript
+            assert "• Running inspect_area" not in transcript
+            assert "temperature" in transcript
 
     asyncio.run(run_test())
 
