@@ -10,8 +10,11 @@ from rai.frontend.cli import (
     parse_cli_input,
     shutdown_tool_connectors,
 )
-from rai.frontend.tui import MemoryTuiApp
+from rai.frontend.tui import ChatTextArea, MemoryTuiApp
+from textual import events
+from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
+from textual.widgets import Markdown, RichLog
 
 
 class _FakeCheckpointer:
@@ -524,8 +527,132 @@ def test_memory_tui_app_has_inline_activity_layout():
                 pass
             else:
                 raise AssertionError("TUI should not render a separate activity log")
+            conversation = app.query_one("#conversation")
+            assert isinstance(conversation, VerticalScroll)
+            assert not isinstance(conversation, RichLog)
             child_ids = [getattr(child, "id", None) for child in app.screen.children]
             assert child_ids.index("input") < child_ids.index("agent_status")
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_keeps_ctrl_c_for_input_clear_not_quit():
+    bindings = {binding.key: binding.action for binding in MemoryTuiApp.BINDINGS}
+
+    assert bindings["ctrl+c"] == "quit"
+    assert bindings["ctrl+q"] == "quit"
+
+
+def test_memory_tui_app_ctrl_c_clears_input_text():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            text_area = app.query_one("#input", ChatTextArea)
+            text_area.load_text("draft message")
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert text_area.text == ""
+            assert app.is_running
+            assert app.query_one("#command_panel").has_class("hidden")
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_ctrl_c_exits_when_input_is_empty():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        exited = False
+
+        def mark_exit(*args, **kwargs):
+            nonlocal exited
+            exited = True
+
+        async with app.run_test() as pilot:
+            app.exit = mark_exit
+            text_area = app.query_one("#input", ChatTextArea)
+            text_area.load_text("")
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert exited
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_renders_assistant_as_markdown_message():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test():
+            app._write_assistant("answer")
+            assistant_message = app.query(".message.assistant").last()
+            assert isinstance(assistant_message, Markdown)
+            assert "Assistant\nanswer" in app._transcript
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_accepts_multiline_paste_and_submits_full_text():
+    async def run_test():
+        graph = _FakeGraph()
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=graph,
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            text_area = app.query_one("#input", ChatTextArea)
+            await text_area._on_paste(events.Paste("first line\nsecond line"))
+            assert text_area.text == "first line\nsecond line"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert graph.calls[0]["input"]["messages"][0].content == (
+                "first line\nsecond line"
+            )
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_copy_transcript_copies_plain_text():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        copied: list[str] = []
+        app.copy_to_clipboard = copied.append
+
+        async with app.run_test() as pilot:
+            await pilot.press("h", "e", "l", "l", "o", "enter")
+            await pilot.pause()
+            app.action_copy_transcript()
+            assert copied
+            assert "User\nhello" in copied[-1]
+            assert "Assistant\nanswer" in copied[-1]
 
     asyncio.run(run_test())
 
@@ -577,18 +704,86 @@ def test_memory_tui_app_resume_picker_resumes_selected_session():
                 "first_user_message": "first",
             },
         )
+        graph = _FakeGraph()
+        graph.messages = [
+            message
+            for index in range(60)
+            for message in (
+                HumanMessage(content=f"user {index}\n" + "text " * 20),
+                AIMessage(content=f"assistant {index}\n" + "markdown text\n" * 4),
+            )
+        ]
         session = MemoryCliSession(
             memory_mgr=memory_mgr,
-            graph=_FakeGraph(),
+            graph=graph,
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test(size=(80, 16)) as pilot:
+            await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+            assert app._session_picker
+            await pilot.press("enter")
+            for _ in range(10):
+                await pilot.pause()
+            conversation = app.query_one("#conversation", VerticalScroll)
+            assert app.session.thread_id == "session-a"
+            assert conversation.scroll_y == conversation.max_scroll_y
+            assert conversation.is_vertical_scroll_end
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_quiet_resume_does_not_render_history():
+    async def run_test():
+        graph = _FakeGraph()
+        graph.messages = [
+            HumanMessage(content="old question"),
+            AIMessage(content="old answer"),
+        ]
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=graph,
             namespace="inspection",
             user_id="operator",
         )
         app = MemoryTuiApp(session, log_path=None)
 
         async with app.run_test() as pilot:
-            await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
-            assert app._session_picker
-            await pilot.press("enter")
+            await pilot.press(
+                "/",
+                "r",
+                "e",
+                "s",
+                "u",
+                "m",
+                "e",
+                " ",
+                "s",
+                "e",
+                "s",
+                "s",
+                "i",
+                "o",
+                "n",
+                "-",
+                "a",
+                " ",
+                "-",
+                "-",
+                "q",
+                "u",
+                "i",
+                "e",
+                "t",
+                "enter",
+            )
+            for _ in range(5):
+                await pilot.pause()
             assert app.session.thread_id == "session-a"
+            assert "Resumed session: session-a" in "\n".join(app._transcript)
+            assert "old question" not in "\n".join(app._transcript)
+            assert "old answer" not in "\n".join(app._transcript)
 
     asyncio.run(run_test())
