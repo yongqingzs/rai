@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 
-from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from rai.memory.manager import MemoryManager
@@ -119,10 +118,11 @@ def list_session_summaries(
     summaries: list[SessionSummary] = []
     for thread_id in get_session_ids(memory_mgr, limit=limit):
         metadata = metadata_by_thread.get(thread_id, {})
-        if metadata:
-            summaries.append(_summary_from_metadata(thread_id, metadata))
-            continue
-        summaries.append(_summary_from_thread_state(graph, thread_id))
+        summaries.append(
+            _summary_from_metadata(thread_id, metadata)
+            if metadata
+            else SessionSummary(thread_id=thread_id)
+        )
     return sorted(
         summaries,
         key=lambda item: item.updated_at or item.created_at or 0.0,
@@ -160,35 +160,6 @@ def _summary_from_metadata(thread_id: str, metadata: dict[str, Any]) -> SessionS
         first_user_message=metadata.get("first_user_message", ""),
         message_count=int(metadata.get("message_count", 0) or 0),
     )
-
-
-def _summary_from_thread_state(graph, thread_id: str) -> SessionSummary:
-    messages, _summary = load_thread_state(graph, thread_id)
-    return SessionSummary(
-        thread_id=thread_id,
-        created_at=_timestamp_from_thread_id(thread_id),
-        updated_at=None,
-        first_user_message=_first_user_message(messages),
-        message_count=len(messages),
-    )
-
-
-def _first_user_message(messages: list) -> str:
-    for message in messages:
-        if isinstance(message, HumanMessage):
-            text = message.text
-            return text if isinstance(text, str) else str(text)
-    return ""
-
-
-def _timestamp_from_thread_id(thread_id: str) -> float | None:
-    if not thread_id.startswith("session-"):
-        return None
-    suffix = thread_id.removeprefix("session-")
-    try:
-        return float(suffix)
-    except ValueError:
-        return None
 
 
 def _get_store_value(

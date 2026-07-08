@@ -197,8 +197,10 @@ def test_memory_cli_session_invokes_graph_with_context_and_thread_id(tmp_path):
     assert call["context"].transient_images[0] != str(image_path)
     assert session.summary == "summary"
     summaries = session.list_session_summaries()
-    assert summaries[0].thread_id == "session-a"
-    assert summaries[0].first_user_message == "hello"
+    summaries_by_id = {summary.thread_id: summary for summary in summaries}
+    assert summaries_by_id["session-a"].first_user_message == "hello"
+    assert summaries_by_id["session-b"].created_at is None
+    assert summaries_by_id["session-b"].first_user_message == ""
 
 
 def test_memory_cli_session_user_switch_rebuilds_graph():
