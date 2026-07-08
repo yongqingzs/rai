@@ -44,6 +44,7 @@ dependencies = [
     "prompt_toolkit>=3.0.43,<4.0.0",
     "numpy<2.0",
     "httpx[socks]>=0.28.1",
+    "textual>=6.0.0,<7.0.0",
 ]
 
 [project.scripts]

@@ -1,14 +1,17 @@
+import asyncio
 from types import SimpleNamespace
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from PIL import Image
-
 from rai.frontend.cli import (
+    CliAgentEvent,
     CliTurn,
     MemoryCliSession,
     parse_cli_input,
     shutdown_tool_connectors,
 )
+from rai.frontend.tui import MemoryTuiApp
+from textual.css.query import NoMatches
 
 
 class _FakeCheckpointer:
@@ -103,6 +106,40 @@ class _FakeGraph:
         return {"messages": self.messages, "summary": "summary"}
 
 
+class _FakeStreamingGraph(_FakeGraph):
+    def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        self.messages = [
+            *self.messages,
+            HumanMessage(content="hello"),
+            AIMessage(content="streamed answer"),
+        ]
+        yield {"agent": {"messages": self.messages[-2:]}}
+
+
+class _FakeAsyncEventsGraph(_FakeGraph):
+    async def astream_events(self, **kwargs):
+        self.calls.append(kwargs)
+        yield {"event": "on_chain_start", "name": "enrich_prompt", "data": {}}
+        yield {"event": "on_chat_model_start", "name": "ChatOpenAI", "data": {}}
+        yield {"event": "on_chat_model_stream", "name": "ChatOpenAI", "data": {}}
+        message = AIMessage(content="event answer", id="ai-event")
+        self.messages = [*self.messages, message]
+        yield {
+            "event": "on_chat_model_end",
+            "name": "ChatOpenAI",
+            "data": {"output": message},
+        }
+        yield {"event": "on_chain_end", "name": "react", "data": {}}
+
+
+class _FakeUnsupportedAsyncEventsGraph(_FakeStreamingGraph):
+    async def astream_events(self, **kwargs):
+        self.calls.append(kwargs)
+        raise NotImplementedError("The SqliteSaver doesn't support async methods")
+        yield  # pragma: no cover
+
+
 def test_parse_cli_input_handles_commands_and_image_turn():
     assert parse_cli_input("/exit").should_exit is True
     assert parse_cli_input("/help").message == "help"
@@ -134,8 +171,7 @@ def test_parse_cli_input_handles_commands_and_image_turn():
     assert parse_cli_input("/resume session-a").message == "resume:session-a"
     assert parse_cli_input("/session session-a").message == "resume:session-a"
     assert (
-        parse_cli_input("/resume session-a --quiet").message
-        == "resume:session-a:quiet"
+        parse_cli_input("/resume session-a --quiet").message == "resume:session-a:quiet"
     )
     assert (
         parse_cli_input("/session session-a --quiet").message
@@ -160,9 +196,7 @@ def test_parse_cli_input_handles_commands_and_image_turn():
         parse_cli_input("/export-session /tmp/session.json").message
         == "export-session:/tmp/session.json"
     )
-    assert (
-        parse_cli_input("/export-session").message == "usage: /export-session <path>"
-    )
+    assert parse_cli_input("/export-session").message == "usage: /export-session <path>"
     assert parse_cli_input("/user operator").message == "user:operator"
 
     image = parse_cli_input("/image /tmp/a.jpg inspect this")
@@ -200,6 +234,87 @@ def test_memory_cli_session_invokes_graph_with_context_and_thread_id(tmp_path):
     summaries_by_id = {summary.thread_id: summary for summary in summaries}
     assert summaries_by_id["session-a"].first_user_message == "hello"
     assert "session-b" not in summaries_by_id
+
+
+def test_memory_cli_session_streams_graph_events():
+    graph = _FakeStreamingGraph()
+    session = MemoryCliSession(
+        memory_mgr=_FakeMemoryManager(),
+        graph=graph,
+        namespace="inspection",
+        user_id="operator",
+        thread_id="session-a",
+    )
+
+    events = list(session.stream_events(CliTurn(text="hello")))
+
+    assert any(
+        isinstance(event, CliAgentEvent) and event.kind == "status" for event in events
+    )
+    assert [event.message.content for event in events if event.kind == "message"] == [
+        "streamed answer"
+    ]
+    assert events[-1].kind == "done"
+
+
+def test_memory_cli_session_streaming_filters_echoed_human_messages():
+    graph = _FakeStreamingGraph()
+    session = MemoryCliSession(
+        memory_mgr=_FakeMemoryManager(),
+        graph=graph,
+        namespace="inspection",
+        user_id="operator",
+        thread_id="session-a",
+    )
+
+    messages = [
+        event.message
+        for event in session.stream_events(CliTurn(text="hello"))
+        if event.kind == "message"
+    ]
+
+    assert all(not isinstance(message, HumanMessage) for message in messages)
+    assert [message.content for message in messages] == ["streamed answer"]
+
+
+def test_memory_cli_session_streams_langchain_events():
+    graph = _FakeAsyncEventsGraph()
+    session = MemoryCliSession(
+        memory_mgr=_FakeMemoryManager(),
+        graph=graph,
+        namespace="inspection",
+        user_id="operator",
+        thread_id="session-a",
+    )
+
+    events = list(session.stream_events(CliTurn(text="hello")))
+    statuses = [event.status for event in events if event.kind == "status"]
+
+    assert "step: enrich_prompt start" in statuses
+    assert "model: connecting (ChatOpenAI)" in statuses
+    assert "model: receiving (ChatOpenAI)" in statuses
+    assert "model: complete (ChatOpenAI)" in statuses
+    assert [event.message.content for event in events if event.kind == "message"] == [
+        "event answer"
+    ]
+
+
+def test_memory_cli_session_falls_back_when_checkpointer_lacks_async_methods():
+    graph = _FakeUnsupportedAsyncEventsGraph()
+    session = MemoryCliSession(
+        memory_mgr=_FakeMemoryManager(),
+        graph=graph,
+        namespace="inspection",
+        user_id="operator",
+        thread_id="session-a",
+    )
+
+    events = list(session.stream_events(CliTurn(text="hello")))
+
+    assert [event.message.content for event in events if event.kind == "message"] == [
+        "streamed answer"
+    ]
+    assert events[-1].kind == "done"
 
 
 def test_memory_cli_session_user_switch_rebuilds_graph():
@@ -377,3 +492,103 @@ def test_shutdown_tool_connectors_shuts_each_unique_connector_once():
     shutdown_tool_connectors(tools)
 
     assert connector.shutdown_count == 1
+
+
+def test_memory_tui_app_can_be_constructed_with_session():
+    session = MemoryCliSession(
+        memory_mgr=_FakeMemoryManager(),
+        graph=_FakeGraph(),
+        namespace="inspection",
+        user_id="operator",
+    )
+
+    app = MemoryTuiApp(session)
+
+    assert app.session is session
+
+
+def test_memory_tui_app_has_inline_activity_layout():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test():
+            try:
+                app.query_one("#activity")
+            except NoMatches:
+                pass
+            else:
+                raise AssertionError("TUI should not render a separate activity log")
+            child_ids = [getattr(child, "id", None) for child in app.screen.children]
+            assert child_ids.index("input") < child_ids.index("agent_status")
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_handles_status_command():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session)
+
+        async with app.run_test() as pilot:
+            await pilot.press("/", "s", "t", "a", "t", "u", "s", "enter")
+            assert app.session.user_id == "operator"
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_uses_command_panel_for_help():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press("/", "h", "e", "l", "p", "enter")
+            assert not app.query_one("#command_panel").has_class("hidden")
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_resume_picker_resumes_selected_session():
+    async def run_test():
+        memory_mgr = _FakeMemoryManager()
+        memory_mgr.store.put(
+            ("inspection", "__sessions__", "metadata"),
+            "session-a",
+            {
+                "thread_id": "session-a",
+                "created_at": 1.0,
+                "updated_at": 1.0,
+                "first_user_message": "first",
+            },
+        )
+        session = MemoryCliSession(
+            memory_mgr=memory_mgr,
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press("/", "r", "e", "s", "u", "m", "e", "enter")
+            assert app._session_picker
+            await pilot.press("enter")
+            assert app.session.thread_id == "session-a"
+
+    asyncio.run(run_test())

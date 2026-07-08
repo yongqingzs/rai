@@ -1,10 +1,16 @@
+import asyncio
 import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messages_to_dict
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    ToolMessage,
+    messages_to_dict,
+)
 from langchain_core.runnables import RunnableConfig
 
 from rai.memory.graph import MemoryAgentContext
@@ -83,6 +89,14 @@ class CliCommandResult:
 
 
 @dataclass
+class CliAgentEvent:
+    kind: str
+    message: Any | None = None
+    status: str = ""
+    data: Any | None = None
+
+
+@dataclass
 class MemoryCliSession:
     memory_mgr: MemoryManager
     graph: Any
@@ -101,7 +115,9 @@ class MemoryCliSession:
         self.reload_thread()
 
     def reload_thread(self) -> None:
-        restored_messages, restored_summary = load_thread_state(self.graph, self.thread_id)
+        restored_messages, restored_summary = load_thread_state(
+            self.graph, self.thread_id
+        )
         self.messages = restored_messages or [self.welcome_message_factory()]
         self.summary = restored_summary
 
@@ -116,6 +132,12 @@ class MemoryCliSession:
         self.thread_id = thread_id
         self.reload_thread()
         return self.messages
+
+    def handle_resume_command(self, value: str) -> tuple[str, list[Any], bool]:
+        quiet = value.endswith(":quiet")
+        thread_id = value.removesuffix(":quiet")
+        messages = self.resume_session(thread_id)
+        return thread_id, messages, quiet
 
     def list_sessions(self) -> list[str]:
         return [summary.thread_id for summary in self.list_session_summaries()]
@@ -199,7 +221,9 @@ class MemoryCliSession:
             self.graph = self.graph_factory(user_id)
         self.reload_thread()
 
-    def invoke(self, turn: CliTurn) -> list[Any]:
+    def _prepare_turn(
+        self, turn: CliTurn
+    ) -> tuple[dict[str, Any], RunnableConfig, Any]:
         human_msg = HumanMessage(content=turn.text)
         transient_images = encode_image_paths(turn.images)
         record_session_activity(
@@ -214,17 +238,15 @@ class MemoryCliSession:
             namespace=self.namespace,
             transient_images=transient_images or None,
         )
-        result = self.graph.invoke(
-            input={"messages": [human_msg]},
-            config=RunnableConfig(
-                {
-                    "recursion_limit": 100,
-                    "configurable": graph_config(self.thread_id).get("configurable", {}),
-                }
-            ),
-            context=context,
+        config = RunnableConfig(
+            {
+                "recursion_limit": 100,
+                "configurable": graph_config(self.thread_id).get("configurable", {}),
+            }
         )
-        old_count = len(self.messages)
+        return {"messages": [human_msg]}, config, context
+
+    def _apply_graph_result(self, result: Any, old_count: int) -> list[Any]:
         if result and "messages" in result:
             self.messages = result["messages"]
             self.summary = result.get("summary", "")
@@ -235,6 +257,163 @@ class MemoryCliSession:
                 message_count=len(self.messages),
             )
         return self.messages[old_count:]
+
+    def invoke(self, turn: CliTurn) -> list[Any]:
+        graph_input, config, context = self._prepare_turn(turn)
+        old_count = len(self.messages)
+        result = self.graph.invoke(
+            input=graph_input,
+            config=config,
+            context=context,
+        )
+        return self._apply_graph_result(result, old_count)
+
+    def stream_events(self, turn: CliTurn) -> Iterable[CliAgentEvent]:
+        astream_events = getattr(self.graph, "astream_events", None)
+        if callable(astream_events):
+            yield from self._astream_events(turn, astream_events)
+            return
+        yield from self._stream_update_events(turn)
+
+    def _astream_events(
+        self,
+        turn: CliTurn,
+        astream_events: Callable[..., Any],
+    ) -> Iterable[CliAgentEvent]:
+        graph_input, config, context = self._prepare_turn(turn)
+        old_count = len(self.messages)
+        emitted_keys = {_message_identity(message) for message in self.messages}
+        yield CliAgentEvent(kind="status", status="agent: starting")
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            try:
+                async_events = astream_events(
+                    input=graph_input,
+                    config=config,
+                    version="v2",
+                    context=context,
+                )
+            except TypeError as exc:
+                if not _is_astream_events_context_error(exc):
+                    raise
+                async_events = astream_events(
+                    input=graph_input,
+                    config=config,
+                    version="v2",
+                )
+
+            while True:
+                try:
+                    event = loop.run_until_complete(async_events.__anext__())
+                except StopAsyncIteration:
+                    break
+                for cli_event in _langchain_event_to_cli_events(event):
+                    if cli_event.kind == "message" and cli_event.message is not None:
+                        if not _is_agent_output_message(cli_event.message):
+                            continue
+                        key = _message_identity(cli_event.message)
+                        if key in emitted_keys:
+                            continue
+                        emitted_keys.add(key)
+                    yield cli_event
+        except Exception as exc:
+            if not _is_astream_events_unsupported_error(exc):
+                raise
+            yield from self._stream_update_events(turn)
+            return
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+        self.reload_thread()
+        for message in self.messages[old_count:]:
+            if not _is_agent_output_message(message):
+                continue
+            key = _message_identity(message)
+            if key in emitted_keys:
+                continue
+            emitted_keys.add(key)
+            yield CliAgentEvent(kind="message", message=message)
+        record_session_activity(
+            self.memory_mgr,
+            self.namespace,
+            self.thread_id,
+            message_count=len(self.messages),
+        )
+        yield CliAgentEvent(kind="done", status="done")
+
+    def _stream_update_events(self, turn: CliTurn) -> Iterable[CliAgentEvent]:
+        stream = getattr(self.graph, "stream", None)
+        if not callable(stream):
+            yield CliAgentEvent(kind="status", status="running")
+            for message in self.invoke(turn):
+                if not _is_agent_output_message(message):
+                    continue
+                yield CliAgentEvent(kind="message", message=message)
+            yield CliAgentEvent(kind="done", status="done")
+            return
+
+        graph_input, config, context = self._prepare_turn(turn)
+        old_count = len(self.messages)
+        emitted_keys = {_message_identity(message) for message in self.messages}
+        last_result: Any = None
+        yield CliAgentEvent(kind="status", status="starting")
+        try:
+            chunks = stream(
+                input=graph_input,
+                config=config,
+                context=context,
+                stream_mode="updates",
+            )
+            for chunk in chunks:
+                last_result = chunk
+                status = _stream_chunk_status(chunk)
+                if status:
+                    yield CliAgentEvent(kind="status", status=status, data=chunk)
+                for message in _extract_messages_from_stream_chunk(chunk):
+                    if not _is_agent_output_message(message):
+                        continue
+                    key = _message_identity(message)
+                    if key in emitted_keys:
+                        continue
+                    emitted_keys.add(key)
+                    yield CliAgentEvent(kind="message", message=message)
+        except TypeError as exc:
+            message = str(exc)
+            if "unexpected keyword" not in message and "stream_mode" not in message:
+                raise
+            result = self.graph.invoke(
+                input=graph_input,
+                config=config,
+                context=context,
+            )
+            for message in self._apply_graph_result(result, old_count):
+                if not _is_agent_output_message(message):
+                    continue
+                yield CliAgentEvent(kind="message", message=message)
+            yield CliAgentEvent(kind="done", status="done")
+            return
+
+        self.reload_thread()
+        for message in self.messages[old_count:]:
+            if not _is_agent_output_message(message):
+                continue
+            key = _message_identity(message)
+            if key in emitted_keys:
+                continue
+            emitted_keys.add(key)
+            yield CliAgentEvent(kind="message", message=message)
+        if last_result and isinstance(last_result, dict):
+            self.summary = last_result.get("summary", self.summary)
+        record_session_activity(
+            self.memory_mgr,
+            self.namespace,
+            self.thread_id,
+            message_count=len(self.messages),
+        )
+        yield CliAgentEvent(kind="done", status="done")
 
 
 def parse_cli_input(line: str) -> CliCommandResult:
@@ -314,7 +493,9 @@ def parse_cli_input(line: str) -> CliCommandResult:
                 message=f"usage: {command_name} <thread_id> [--quiet]",
             )
         suffix = ":quiet" if quiet else ""
-        return CliCommandResult(handled=True, message=f"resume:{resume_args[0]}{suffix}")
+        return CliCommandResult(
+            handled=True, message=f"resume:{resume_args[0]}{suffix}"
+        )
     if stripped in {"/users", "/user"}:
         return CliCommandResult(handled=True, message="users")
     if stripped.startswith("/memory"):
@@ -331,9 +512,7 @@ def parse_cli_input(line: str) -> CliCommandResult:
     if stripped.startswith("/user"):
         parts = stripped.split(maxsplit=1)
         if len(parts) != 2 or not parts[1].strip():
-            return CliCommandResult(
-                handled=True, message="usage: /user <user_id>"
-            )
+            return CliCommandResult(handled=True, message="usage: /user <user_id>")
         return CliCommandResult(handled=True, message=f"user:{parts[1].strip()}")
     if stripped.startswith("/image"):
         parts = stripped.split(maxsplit=2)
@@ -350,6 +529,123 @@ def parse_cli_input(line: str) -> CliCommandResult:
 
 def encode_image_paths(image_paths: Sequence[str]) -> list[str]:
     return [preprocess_image(str(Path(path).expanduser())) for path in image_paths]
+
+
+def _stream_chunk_status(chunk: Any) -> str:
+    if isinstance(chunk, tuple) and len(chunk) == 2:
+        mode, payload = chunk
+        if isinstance(payload, dict) and payload:
+            return f"{mode}: {', '.join(str(key) for key in payload.keys())}"
+        return str(mode)
+    if isinstance(chunk, dict) and chunk:
+        return " -> ".join(str(key) for key in chunk.keys())
+    return "running"
+
+
+def _extract_messages_from_stream_chunk(chunk: Any) -> list[Any]:
+    messages: list[Any] = []
+    if isinstance(chunk, tuple) and len(chunk) == 2:
+        return _extract_messages_from_stream_chunk(chunk[1])
+    if isinstance(chunk, dict):
+        value = chunk.get("messages")
+        if isinstance(value, list):
+            messages.extend(value)
+        elif value is not None and hasattr(value, "content"):
+            messages.append(value)
+        for key, value in chunk.items():
+            if key == "messages":
+                continue
+            messages.extend(_extract_messages_from_stream_chunk(value))
+    elif isinstance(chunk, list):
+        for item in chunk:
+            messages.extend(_extract_messages_from_stream_chunk(item))
+    elif hasattr(chunk, "content"):
+        messages.append(chunk)
+    return messages
+
+
+def _message_identity(message: Any) -> tuple[str, str]:
+    message_id = getattr(message, "id", None)
+    if message_id:
+        return (message.__class__.__name__, str(message_id))
+    tool_call_id = getattr(message, "tool_call_id", None)
+    if tool_call_id:
+        return (message.__class__.__name__, str(tool_call_id))
+    return (message.__class__.__name__, str(getattr(message, "content", message)))
+
+
+def _is_agent_output_message(message: Any) -> bool:
+    return isinstance(message, AIMessage | ToolMessage)
+
+
+def _langchain_event_to_cli_events(event: dict[str, Any]) -> list[CliAgentEvent]:
+    event_type = str(event.get("event", ""))
+    name = str(event.get("name") or "unknown")
+    data = event.get("data") or {}
+    events: list[CliAgentEvent] = []
+
+    if event_type in {"on_chain_start", "on_chain_stream", "on_chain_end"}:
+        if _is_useful_chain_name(name):
+            phase = {
+                "on_chain_start": "start",
+                "on_chain_stream": "running",
+                "on_chain_end": "done",
+            }[event_type]
+            events.append(CliAgentEvent(kind="status", status=f"step: {name} {phase}"))
+    elif event_type in {"on_chat_model_start", "on_llm_start"}:
+        events.append(
+            CliAgentEvent(kind="status", status=f"model: connecting ({name})")
+        )
+    elif event_type in {"on_chat_model_stream", "on_llm_stream"}:
+        events.append(CliAgentEvent(kind="status", status=f"model: receiving ({name})"))
+    elif event_type in {"on_chat_model_end", "on_llm_end"}:
+        events.append(CliAgentEvent(kind="status", status=f"model: complete ({name})"))
+        output = data.get("output")
+        if output is not None and hasattr(output, "content"):
+            events.append(CliAgentEvent(kind="message", message=output))
+    elif event_type in {"on_chat_model_error", "on_llm_error"}:
+        events.append(CliAgentEvent(kind="status", status=f"model: error ({name})"))
+    elif event_type == "on_tool_start":
+        events.append(CliAgentEvent(kind="status", status=f"tool: {name} starting"))
+    elif event_type == "on_tool_end":
+        events.append(CliAgentEvent(kind="status", status=f"tool: {name} done"))
+        output = data.get("output")
+        if output is not None and hasattr(output, "content"):
+            events.append(CliAgentEvent(kind="message", message=output))
+    elif event_type == "on_tool_error":
+        events.append(CliAgentEvent(kind="status", status=f"tool: {name} error"))
+
+    return events
+
+
+def _is_useful_chain_name(name: str) -> bool:
+    ignored = {
+        "LangGraph",
+        "ChannelWrite",
+        "ChannelRead",
+        "RunnableSequence",
+        "RunnableLambda",
+    }
+    return name not in ignored and not name.startswith("__")
+
+
+def _is_astream_events_context_error(exc: TypeError) -> bool:
+    message = str(exc)
+    return "unexpected keyword" in message and "context" in message
+
+
+def _is_astream_events_unsupported_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "unexpected keyword" in message
+        or "missing" in message
+        or "version" in message
+        or "astream_events" in message
+        or "doesn't support async" in message
+        or "does not support async" in message
+        or "async methods" in message
+        or "async methonds" in message
+    )
 
 
 def _normalize_memory_kind(kind: str) -> str:
@@ -393,7 +689,9 @@ class CliRenderer:
         if self.console is None:
             print(f"Assistant: {message}")
             return
-        self.console.print(Panel(Markdown(message), title="Assistant", border_style="green"))
+        self.console.print(
+            Panel(Markdown(message), title="Assistant", border_style="green")
+        )
 
     def tool_call(self, name: str, args: Any) -> None:
         formatted = _format_json(args)
@@ -509,7 +807,9 @@ class CliRenderer:
         namespace: str,
     ) -> None:
         if not items:
-            self.system(f"No long-term memory for user={user_id} namespace={namespace}.")
+            self.system(
+                f"No long-term memory for user={user_id} namespace={namespace}."
+            )
             return
         if self.console is None or Table is None:
             print(f"Long-term memory for user={user_id} namespace={namespace}")
@@ -625,9 +925,7 @@ def _handle_command(
         return
     if command.message and command.message.startswith("resume:"):
         resume_value = command.message.removeprefix("resume:")
-        quiet = resume_value.endswith(":quiet")
-        thread_id = resume_value.removesuffix(":quiet")
-        messages = session.resume_session(thread_id)
+        thread_id, messages, quiet = session.handle_resume_command(resume_value)
         renderer.system(f"Resumed session: {thread_id}")
         if not quiet:
             renderer.messages(messages)
