@@ -33,8 +33,8 @@ from rai.memory.manager import MemoryManager
 from rai.memory.session import (
     delete_session,
     delete_session_metadata,
-    get_latest_session_id,
-    get_session_ids,
+    get_latest_session_id_from_metadata,
+    get_session_ids_from_metadata,
     graph_config,
     list_session_summaries,
     load_thread_state,
@@ -145,13 +145,13 @@ def render_memory_sidebar(
 ) -> MemorySidebarState:
     """Render reusable Streamlit controls for memory session/user management."""
     st.sidebar.subheader("Short-Term Memory")
-    session_ids = get_session_ids(memory_mgr)
+    session_ids = get_session_ids_from_metadata(memory_mgr, namespace)
     session_summaries = list_session_summaries(memory_mgr, graph, namespace)
     session_label_by_id = {
         summary.thread_id: session_summary_label(summary)
         for summary in session_summaries
     }
-    latest_session_id = get_latest_session_id(memory_mgr)
+    latest_session_id = get_latest_session_id_from_metadata(memory_mgr, namespace)
     if not session_ids:
         st.sidebar.info("No sessions yet. Start a conversation.")
 

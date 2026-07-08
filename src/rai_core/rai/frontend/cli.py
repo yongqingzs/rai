@@ -14,7 +14,6 @@ from rai.memory.session import (
     SessionSummary,
     delete_session,
     delete_session_metadata,
-    get_session_ids,
     graph_config,
     list_session_summaries,
     load_thread_state,
@@ -119,7 +118,7 @@ class MemoryCliSession:
         return self.messages
 
     def list_sessions(self) -> list[str]:
-        return get_session_ids(self.memory_mgr)
+        return [summary.thread_id for summary in self.list_session_summaries()]
 
     def list_session_summaries(self) -> list[SessionSummary]:
         return list_session_summaries(self.memory_mgr, self.graph, self.namespace)

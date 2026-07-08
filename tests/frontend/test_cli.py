@@ -199,8 +199,7 @@ def test_memory_cli_session_invokes_graph_with_context_and_thread_id(tmp_path):
     summaries = session.list_session_summaries()
     summaries_by_id = {summary.thread_id: summary for summary in summaries}
     assert summaries_by_id["session-a"].first_user_message == "hello"
-    assert summaries_by_id["session-b"].created_at is None
-    assert summaries_by_id["session-b"].first_user_message == ""
+    assert "session-b" not in summaries_by_id
 
 
 def test_memory_cli_session_user_switch_rebuilds_graph():

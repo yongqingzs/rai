@@ -44,13 +44,26 @@ def session_metadata_namespace(namespace: str) -> tuple[str, str, str]:
 
 
 def get_session_ids(memory_mgr: MemoryManager, limit: int = 200) -> List[str]:
-    """Get unique thread IDs from the checkpointer."""
+    """Get unique thread IDs from the checkpointer.
+
+    Prefer ``get_session_ids_from_metadata`` for UI session lists. This function
+    can be expensive for large checkpoint payloads because LangGraph
+    checkpointer iteration may deserialize checkpoint blobs.
+    """
     thread_ids = set()
     for checkpoint in memory_mgr.checkpointer.list(None, limit=limit):
         thread_id = checkpoint.config.get("configurable", {}).get("thread_id")
         if thread_id:
             thread_ids.add(thread_id)
     return sorted(thread_ids)
+
+
+def get_session_ids_from_metadata(
+    memory_mgr: MemoryManager,
+    namespace: str,
+    limit: int = 200,
+) -> List[str]:
+    return sorted(_load_session_metadata(memory_mgr, namespace, limit).keys())
 
 
 def get_latest_session_id(memory_mgr: MemoryManager, limit: int = 200) -> Optional[str]:
@@ -60,6 +73,15 @@ def get_latest_session_id(memory_mgr: MemoryManager, limit: int = 200) -> Option
         if thread_id:
             return thread_id
     return None
+
+
+def get_latest_session_id_from_metadata(
+    memory_mgr: MemoryManager,
+    namespace: str,
+    limit: int = 200,
+) -> Optional[str]:
+    summaries = list_session_summaries(memory_mgr, None, namespace, limit=limit)
+    return summaries[0].thread_id if summaries else None
 
 
 def delete_session(memory_mgr: MemoryManager, thread_id: str):
@@ -115,14 +137,10 @@ def list_session_summaries(
     limit: int = 200,
 ) -> list[SessionSummary]:
     metadata_by_thread = _load_session_metadata(memory_mgr, namespace, limit)
-    summaries: list[SessionSummary] = []
-    for thread_id in get_session_ids(memory_mgr, limit=limit):
-        metadata = metadata_by_thread.get(thread_id, {})
-        summaries.append(
-            _summary_from_metadata(thread_id, metadata)
-            if metadata
-            else SessionSummary(thread_id=thread_id)
-        )
+    summaries = [
+        _summary_from_metadata(thread_id, metadata)
+        for thread_id, metadata in metadata_by_thread.items()
+    ]
     return sorted(
         summaries,
         key=lambda item: item.updated_at or item.created_at or 0.0,
