@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
@@ -23,12 +25,6 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.store.base import BaseStore, IndexConfig
 
 from rai.memory.config import MemoryConfig, load_memory_config
-from rai.messages.multimodal import (
-    AIMultimodalMessage,
-    HumanMultimodalMessage,
-    SystemMultimodalMessage,
-    ToolMultimodalMessage,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +73,8 @@ class MemoryManager:
         self._store: Optional[BaseStore] = None
         self._cm_checker = None
         self._cm_store = None
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._async_thread: threading.Thread | None = None
 
     @property
     def checkpointer(self) -> BaseCheckpointSaver:
@@ -97,6 +95,18 @@ class MemoryManager:
     def _create_components(
         self,
     ) -> Tuple[BaseCheckpointSaver, BaseStore]:
+        if self._config.backend == "sqlite":
+            checkpointer, store, cm_checker, cm_store = self._run_on_async_loop(
+                _create_sqlite_async_components(
+                    self._config.short_term_path,
+                    self._config.long_term_path,
+                    self._embeddings,
+                )
+            )
+            self._cm_checker = cm_checker
+            self._cm_store = cm_store
+            return checkpointer, store
+
         checkpointer, store, cm_checker, cm_store = _create_memory_components(
             backend=self._config.backend,
             short_term_path=self._config.short_term_path,
@@ -107,6 +117,37 @@ class MemoryManager:
         self._cm_checker = cm_checker
         self._cm_store = cm_store
         return checkpointer, store
+
+    @property
+    def async_loop(self) -> asyncio.AbstractEventLoop | None:
+        return self._async_loop
+
+    def _ensure_async_loop(self) -> asyncio.AbstractEventLoop:
+        if self._async_loop is not None and self._async_loop.is_running():
+            return self._async_loop
+
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(
+            target=run_loop,
+            name="rai-memory-asyncio",
+            daemon=True,
+        )
+        thread.start()
+        ready.wait()
+        self._async_loop = loop
+        self._async_thread = thread
+        return loop
+
+    def _run_on_async_loop(self, coro):
+        loop = self._ensure_async_loop()
+        return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
     def start(self):
         if not self._config.enabled:
@@ -122,16 +163,40 @@ class MemoryManager:
 
     def setup(self):
         if self._checkpointer is not None and hasattr(self._checkpointer, "setup"):
-            self._checkpointer.setup()
+            result = self._checkpointer.setup()
+            if asyncio.iscoroutine(result):
+                self._run_on_async_loop(result)
         if self._store is not None and hasattr(self._store, "setup"):
             try:
-                self._store.setup()
+                result = self._store.setup()
+                if asyncio.iscoroutine(result):
+                    self._run_on_async_loop(result)
             except Exception as e:
                 logger.warning(
                     f"Store setup failed (semantic search may be unavailable): {e}"
                 )
 
     def stop(self):
+        if self._async_loop is not None:
+            loop = self._async_loop
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._close_async_components(),
+                    loop,
+                ).result()
+            finally:
+                self._checkpointer = None
+                self._store = None
+                self._cm_checker = None
+                self._cm_store = None
+                loop.call_soon_threadsafe(loop.stop)
+                if self._async_thread is not None:
+                    self._async_thread.join(timeout=2)
+                loop.close()
+                self._async_loop = None
+                self._async_thread = None
+            return
+
         if self._checkpointer is not None:
             if hasattr(self._checkpointer, "close"):
                 self._checkpointer.close()
@@ -142,6 +207,20 @@ class MemoryManager:
             self._store = None
         self._cm_checker = None
         self._cm_store = None
+
+    async def _close_async_components(self) -> None:
+        if self._store is not None:
+            store_task = getattr(self._store, "_task", None)
+            if store_task is not None and not store_task.done():
+                store_task.cancel()
+                try:
+                    await store_task
+                except asyncio.CancelledError:
+                    pass
+        if self._cm_checker is not None:
+            await self._cm_checker.__aexit__(None, None, None)
+        if self._cm_store is not None:
+            await self._cm_store.__aexit__(None, None, None)
 
     def __enter__(self):
         self.start()
@@ -171,6 +250,31 @@ def _create_memory_components(
     return _create_sqlite_components(short_term_path, long_term_path, embeddings)
 
 
+async def _create_sqlite_async_components(
+    short_term_path: str,
+    long_term_path: str,
+    embeddings: Optional[Embeddings],
+) -> Tuple[BaseCheckpointSaver, BaseStore, Any, Any]:
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from langgraph.store.sqlite.aio import AsyncSqliteStore
+    from langgraph.store.sqlite.base import SqliteIndexConfig
+
+    _ensure_sqlite_parent_dir(short_term_path)
+    _ensure_sqlite_parent_dir(long_term_path)
+
+    cm_checker = AsyncSqliteSaver.from_conn_string(short_term_path)
+    checkpointer = await cm_checker.__aenter__()
+    checkpointer.serde = _memory_serde()
+    await checkpointer.setup()
+
+    idx = _default_index_config(embeddings)
+    sqlite_index = SqliteIndexConfig(embed=idx["embed"], dims=idx["dims"])
+    cm_store = AsyncSqliteStore.from_conn_string(long_term_path, index=sqlite_index)
+    store = await cm_store.__aenter__()
+    await store.setup()
+    return checkpointer, store, cm_checker, cm_store
+
+
 def _create_sqlite_components(
     short_term_path: str,
     long_term_path: str,
@@ -191,9 +295,9 @@ def _create_sqlite_components(
     idx = _default_index_config(embeddings)
     sqlite_index = SqliteIndexConfig(embed=idx["embed"], dims=idx["dims"])
     cm_store = SqliteStore.from_conn_string(long_term_path, index=sqlite_index)
-    store_store = cm_store.__enter__()
-    store_store.setup()
-    return checkpointer, store_store, cm_checker, cm_store
+    store = cm_store.__enter__()
+    store.setup()
+    return checkpointer, store, cm_checker, cm_store
 
 
 def _ensure_sqlite_parent_dir(path: str) -> None:

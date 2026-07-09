@@ -74,3 +74,29 @@ def invoke_llm_with_tracing(
     enhanced_config["callbacks"] = all_callbacks
 
     return llm.invoke(messages, config=enhanced_config)
+
+
+async def ainvoke_llm_with_tracing(
+    llm: BaseChatModel,
+    messages: List[BaseMessage],
+    config: Optional[RunnableConfig] = None,
+) -> Any:
+    """Async variant of :func:`invoke_llm_with_tracing`."""
+    tracing_callbacks = get_tracing_callbacks()
+
+    if len(tracing_callbacks) == 0:
+        return await llm.ainvoke(messages, config=config)
+
+    enhanced_config = config.copy() if config else {}
+    existing_callbacks = config.get("callbacks", []) if config else []
+
+    if hasattr(existing_callbacks, "handlers"):
+        all_callbacks = existing_callbacks.handlers + tracing_callbacks
+    elif isinstance(existing_callbacks, list):
+        all_callbacks = existing_callbacks + tracing_callbacks
+    else:
+        all_callbacks = tracing_callbacks
+
+    enhanced_config["callbacks"] = all_callbacks
+
+    return await llm.ainvoke(messages, config=enhanced_config)

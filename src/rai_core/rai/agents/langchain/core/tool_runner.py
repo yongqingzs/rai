@@ -218,7 +218,7 @@ class ToolRunner(RunnableCallable):
         logger: Optional[logging.Logger] = None,
         tool_call_guard: ToolCallGuard | None = None,
     ) -> None:
-        super().__init__(self._func, name=name, tags=tags, trace=False)
+        super().__init__(self._func, self._afunc, name=name, tags=tags, trace=False)
         self.logger = logger or logging.getLogger(__name__)
         self.tool_call_guard = tool_call_guard or ToolCallGuard.with_default_policies()
         self.tools_by_name: Dict[str, BaseTool] = {}
@@ -350,6 +350,121 @@ class ToolRunner(RunnableCallable):
 
             self.update_input_with_outputs(input, outputs)
             return input
+
+    async def _afunc(self, input: dict[str, Any], config: RunnableConfig) -> Any:
+        config["max_concurrency"] = (
+            1  # TODO(maciejmajek): use better mechanism for task queueing
+        )
+        messages = self.get_messages(input)
+        if not messages:
+            raise ValueError("No message found in input")
+
+        message = messages[-1]
+        if not isinstance(message, AIMessage):
+            raise ValueError("Last message is not an AIMessage")
+
+        async def run_one(index_and_call: tuple[int, ToolCall]):
+            index, call = index_and_call
+            blocked_reason = self.tool_call_guard.check(call, messages, index)
+            if blocked_reason is not None:
+                self.logger.info(
+                    f"Blocked tool call: {call['name']}, args: {call['args']}. "
+                    f"Reason: {blocked_reason}"
+                )
+                return ToolMessage(
+                    content=blocked_reason,
+                    name=call["name"],
+                    tool_call_id=call["id"],
+                    status="error",
+                )
+
+            self.logger.info(f"Running tool: {call['name']}, args: {call['args']}")
+            artifact = None
+
+            try:
+                ts = time.perf_counter()
+                output = await self.tools_by_name[call["name"]].ainvoke(call, config)  # type: ignore
+                te = time.perf_counter() - ts
+                self.logger.info(
+                    f"Tool {call['name']} completed in {te:.2f} seconds. Tool output: {str(output.content)[:100]}{'...' if len(str(output.content)) > 100 else ''}"
+                )
+                self.logger.debug(
+                    f"Tool {call['name']} output: \n\n{str(output.content)}"
+                )
+            except ValidationError as e:
+                errors = e.errors()
+                for error in errors:
+                    error.pop(
+                        "url"
+                    )  # get rid of the  https://errors.pydantic.dev/... url
+
+                error_message = f"""
+                                    Validation error in tool {call["name"]}:
+                                    {e.title}
+                                    Number of errors: {e.error_count()}
+                                    Errors:
+                                    {json.dumps(errors, indent=2)}
+                                """
+                self.logger.info(error_message)
+                output = ToolMessage(
+                    content=error_message,
+                    name=call["name"],
+                    tool_call_id=call["id"],
+                    status="error",
+                )
+            except Exception as e:
+                self.logger.info(f'Error in "{call["name"]}", error: {e}')
+                output = ToolMessage(
+                    content=f"Failed to run tool. Error: {e}",
+                    name=call["name"],
+                    tool_call_id=call["id"],
+                    status="error",
+                )
+
+            if output.artifact is not None:
+                artifact = output.artifact
+                if not isinstance(artifact, dict):
+                    raise ValueError(
+                        "Artifact must be a dictionary with optional keys: 'images', 'audios'"
+                    )
+
+                artifact = cast(MultimodalArtifact, artifact)
+                store_artifacts(output.tool_call_id, [artifact])
+
+            if artifact is not None and (
+                len(artifact.get("images", [])) > 0
+                or len(artifact.get("audios", [])) > 0
+            ):  # multimodal case, we currently support images and audios artifacts
+                return ToolMultimodalMessage(
+                    content=msg_content_output(output.content),
+                    name=call["name"],
+                    tool_call_id=call["id"],
+                    images=artifact.get("images", []),
+                    audios=artifact.get("audios", []),
+                )
+
+            return output
+
+        indexed_tool_calls = list(enumerate(message.tool_calls))
+        raw_outputs = []
+        for indexed_tool_call in indexed_tool_calls:
+            raw_outputs.append(await run_one(indexed_tool_call))
+        outputs: List[Any] = []
+        for raw_output in raw_outputs:
+            if isinstance(raw_output, ToolMultimodalMessage):
+                outputs.extend(
+                    raw_output.postprocess()
+                )  # openai please allow tool messages with images!
+            else:
+                outputs.append(raw_output)
+
+        # because we can't answer an aiMessage with an alternating sequence of tool and human messages
+        # we sort the messages by type so that the tool messages are sent first
+        # for more information see implementation of ToolMultimodalMessage.postprocess
+        outputs.sort(key=lambda x: x.__class__.__name__, reverse=True)
+
+        self.update_input_with_outputs(input, outputs)
+        return input
 
 
 class SubAgentToolRunner(ToolRunner):

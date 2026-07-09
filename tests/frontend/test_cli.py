@@ -1,7 +1,14 @@
 import asyncio
+import time
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages.base import BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import tool
 from PIL import Image
 from rai.frontend.cli import (
     CliAgentEvent,
@@ -11,10 +18,27 @@ from rai.frontend.cli import (
     shutdown_tool_connectors,
 )
 from rai.frontend.tui import RAI_AGENT_THEME, ChatTextArea, MemoryTuiApp
+from rai.memory.agent_factory import create_memory_agent_with_tools
+from rai.memory.config import MemoryConfig
+from rai.memory.manager import MemoryManager
 from textual import events
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Markdown, RichLog
+
+
+async def _wait_for_transcript(
+    app: MemoryTuiApp,
+    text: str,
+    *,
+    timeout: float = 2.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if text in "\n".join(app._transcript):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"Timed out waiting for transcript text: {text}")
 
 
 class _FakeCheckpointer:
@@ -120,6 +144,18 @@ class _FakeStreamingGraph(_FakeGraph):
         yield {"agent": {"messages": self.messages[-2:]}}
 
 
+class _FakeDelayedStreamingGraph(_FakeGraph):
+    def stream(self, **kwargs):
+        self.calls.append(kwargs)
+        first = AIMessage(content="first streamed step", id="first-step")
+        second = AIMessage(content="final streamed step", id="final-step")
+        self.messages = [*self.messages, first]
+        yield {"agent": {"messages": [first]}}
+        time.sleep(0.3)
+        self.messages = [*self.messages, second]
+        yield {"agent": {"messages": [second]}}
+
+
 class _FakeAsyncEventsGraph(_FakeGraph):
     async def astream_events(self, **kwargs):
         self.calls.append(kwargs)
@@ -194,6 +230,61 @@ class _FakeToolEventsGraph(_FakeGraph):
             "name": "ChatOpenAI",
             "data": {"output": AIMessage(content="done", id="tool-events-ai")},
         }
+
+
+class _ToolCallingChatModel(BaseChatModel):
+    i: int = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    @property
+    def _llm_type(self):
+        return "tool-calling-test"
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop=None,
+        run_manager=None,
+        **kwargs: Any,
+    ):
+        if self.i == 0:
+            message = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "delayed_tool",
+                        "args": {"query": "point1"},
+                        "id": "call-1",
+                    }
+                ],
+            )
+        else:
+            message = AIMessage(content="final answer")
+        self.i += 1
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop=None,
+        run_manager=None,
+        **kwargs: Any,
+    ):
+        return self._generate(
+            messages,
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
+
+
+@tool
+def delayed_tool(query: str) -> str:
+    """Delay and return a deterministic tool result."""
+    time.sleep(0.3)
+    return f"done:{query}"
 
 
 def test_parse_cli_input_handles_commands_and_image_turn():
@@ -358,6 +449,63 @@ def test_memory_cli_session_streams_langchain_events():
     assert [event.message.content for event in events if event.kind == "message"] == [
         "event answer"
     ]
+
+
+def test_memory_cli_session_streams_real_sqlite_tool_start_before_tool_end(tmp_path):
+    memory_mgr = MemoryManager(
+        config=MemoryConfig(
+            enabled=True,
+            backend="sqlite",
+            short_term_path=str(Path(tmp_path) / "checkpoints.db"),
+            long_term_path=str(Path(tmp_path) / "store.db"),
+            namespace="inspection",
+        )
+    )
+    memory_mgr.start()
+    try:
+        graph = create_memory_agent_with_tools(
+            memory_mgr=memory_mgr,
+            llm=_ToolCallingChatModel(),
+            base_system_prompt_builder=lambda _context: "You are a test agent.",
+            namespace="inspection",
+            user_id="operator",
+            base_tools=[delayed_tool],
+        )
+        session = MemoryCliSession(
+            memory_mgr=memory_mgr,
+            graph=graph,
+            namespace="inspection",
+            user_id="operator",
+            thread_id="session-a",
+        )
+
+        start_time = time.monotonic()
+        tool_status_times: list[tuple[str, float]] = []
+        messages = []
+        for event in session.stream_events(CliTurn(text="run delayed tool")):
+            if event.kind == "status" and event.status.startswith("tool:"):
+                tool_status_times.append((event.status, time.monotonic() - start_time))
+            if event.kind == "message":
+                messages.append(event.message)
+
+        starts = [
+            elapsed
+            for status, elapsed in tool_status_times
+            if status == "tool: delayed_tool starting"
+        ]
+        ends = [
+            elapsed
+            for status, elapsed in tool_status_times
+            if status == "tool: delayed_tool done"
+        ]
+        assert starts and starts[0] < 0.2
+        assert ends and ends[0] >= 0.3
+        assert starts[0] < ends[0]
+        assert [
+            message.content for message in messages if isinstance(message, ToolMessage)
+        ] == ["done:point1"]
+    finally:
+        memory_mgr.stop()
 
 
 def test_memory_cli_session_falls_back_when_checkpointer_lacks_async_methods():
@@ -790,6 +938,32 @@ def test_memory_tui_app_renders_codex_style_agent_timeline():
     asyncio.run(run_test())
 
 
+def test_memory_tui_app_renders_stream_chunks_before_turn_done():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeDelayedStreamingGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press("s", "t", "r", "e", "a", "m", "enter")
+            await _wait_for_transcript(app, "first streamed step")
+            transcript = "\n".join(app._transcript)
+            assert "first streamed step" in transcript
+            assert "final streamed step" not in transcript
+            assert "• Worked for" not in transcript
+            await _wait_for_transcript(app, "final streamed step")
+            await _wait_for_transcript(app, "• Worked for")
+            transcript = "\n".join(app._transcript)
+            assert "final streamed step" in transcript
+            assert "• Worked for" in transcript
+
+    asyncio.run(run_test())
+
+
 def test_memory_tui_app_updates_working_timeline_in_place():
     async def run_test():
         session = MemoryCliSession(
@@ -862,6 +1036,7 @@ def test_memory_tui_app_renders_realtime_tool_events_as_running_then_ran():
             transcript = "\n".join(app._transcript)
             assert "• Ran inspect_area" in transcript
             assert "• Running inspect_area" not in transcript
+            assert "• Tool result inspect_area" not in transcript
             assert "temperature" in transcript
 
     asyncio.run(run_test())

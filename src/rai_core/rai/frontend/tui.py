@@ -258,6 +258,7 @@ class MemoryTuiApp(App):
         self._working_widget: Static | None = None
         self._working_transcript_index: int | None = None
         self._tool_activity_widgets: dict[str, tuple[Static, str]] = {}
+        self._realtime_tool_result_ids: set[str] = set()
         self._transcript: list[str] = []
         self.log_path = Path(log_path).expanduser() if log_path is not None else None
 
@@ -435,6 +436,11 @@ class MemoryTuiApp(App):
                     self._write_tool_call(name, tool_call.get("args", {}))
             elif isinstance(message, ToolMessage):
                 self._refresh_status(f"tool result: {message.name or 'tool'}")
+                if self._is_realtime_tool_result(message):
+                    self._append_log(
+                        "tool result", f"{message.name or 'tool'}\n{message.content}"
+                    )
+                    continue
                 self._write_tool_result(message.name or "tool", message.content)
             elif isinstance(message, HumanMessage):
                 self._write_user(str(message.content))
@@ -695,6 +701,7 @@ class MemoryTuiApp(App):
         self._turn_started_at = monotonic()
         self._stop_turn_timer()
         self._tool_activity_widgets.clear()
+        self._realtime_tool_result_ids.clear()
         text = "• Working (0s)"
         self._working_transcript_index = len(self._transcript)
         self._working_widget = self._append_message(
@@ -794,6 +801,8 @@ class MemoryTuiApp(App):
         self, tool_key: str, name: str, result: Any, succeeded: bool
     ) -> None:
         summary = self._summarize_value(result)
+        if isinstance(result, ToolMessage) and result.tool_call_id:
+            self._realtime_tool_result_ids.add(str(result.tool_call_id))
         action = "Ran" if succeeded else "Tool failed"
         style = "#86c39a" if succeeded else "#d06f6f"
         text = f"• {action} {name}"
@@ -868,6 +877,8 @@ class MemoryTuiApp(App):
     def _summarize_value(self, value: Any, limit: int = 180) -> str:
         if value is None:
             return ""
+        if isinstance(value, ToolMessage):
+            value = value.content
         if isinstance(value, str):
             summary = value
         else:
@@ -876,6 +887,12 @@ class MemoryTuiApp(App):
         if len(summary) > limit:
             return f"{summary[: limit - 1]}…"
         return summary
+
+    def _is_realtime_tool_result(self, message: ToolMessage) -> bool:
+        return bool(
+            message.tool_call_id
+            and str(message.tool_call_id) in self._realtime_tool_result_ids
+        )
 
     def _as_markdown_message(self, text: str) -> str:
         title, _, body = text.partition("\n")

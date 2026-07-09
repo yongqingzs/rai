@@ -285,28 +285,44 @@ class MemoryCliSession:
         emitted_keys = {_message_identity(message) for message in self.messages}
         yield CliAgentEvent(kind="status", status="agent: starting")
 
-        loop = asyncio.new_event_loop()
+        memory_loop = getattr(self.memory_mgr, "async_loop", None)
+        loop = memory_loop or asyncio.new_event_loop()
+        owns_loop = memory_loop is None
         try:
-            asyncio.set_event_loop(loop)
+            if owns_loop:
+                asyncio.set_event_loop(loop)
             try:
-                async_events = astream_events(
-                    input=graph_input,
-                    config=config,
-                    version="v2",
-                    context=context,
+                async_events = _run_coroutine_on_loop(
+                    loop,
+                    _create_async_events(
+                        astream_events,
+                        graph_input,
+                        config,
+                        context,
+                    ),
+                    owns_loop,
                 )
             except TypeError as exc:
                 if not _is_astream_events_context_error(exc):
                     raise
-                async_events = astream_events(
-                    input=graph_input,
-                    config=config,
-                    version="v2",
+                async_events = _run_coroutine_on_loop(
+                    loop,
+                    _create_async_events(
+                        astream_events,
+                        graph_input,
+                        config,
+                        None,
+                    ),
+                    owns_loop,
                 )
 
             while True:
                 try:
-                    event = loop.run_until_complete(async_events.__anext__())
+                    event = _run_coroutine_on_loop(
+                        loop,
+                        async_events.__anext__(),
+                        owns_loop,
+                    )
                 except StopAsyncIteration:
                     break
                 for cli_event in _langchain_event_to_cli_events(event):
@@ -324,8 +340,9 @@ class MemoryCliSession:
             yield from self._stream_update_events(turn)
             return
         finally:
-            asyncio.set_event_loop(None)
-            loop.close()
+            if owns_loop:
+                asyncio.set_event_loop(None)
+                loop.close()
 
         self.reload_thread()
         for message in self.messages[old_count:]:
@@ -564,13 +581,39 @@ def _extract_messages_from_stream_chunk(chunk: Any) -> list[Any]:
     return messages
 
 
+async def _create_async_events(
+    astream_events: Callable[..., Any],
+    graph_input: dict[str, Any],
+    config: RunnableConfig,
+    context: MemoryAgentContext | None,
+) -> Any:
+    kwargs = {
+        "input": graph_input,
+        "config": config,
+        "version": "v2",
+    }
+    if context is not None:
+        kwargs["context"] = context
+    return astream_events(**kwargs)
+
+
+def _run_coroutine_on_loop(
+    loop: asyncio.AbstractEventLoop,
+    coro,
+    owns_loop: bool,
+) -> Any:
+    if owns_loop:
+        return loop.run_until_complete(coro)
+    return asyncio.run_coroutine_threadsafe(coro, loop).result()
+
+
 def _message_identity(message: Any) -> tuple[str, str]:
-    message_id = getattr(message, "id", None)
-    if message_id:
-        return (message.__class__.__name__, str(message_id))
     tool_call_id = getattr(message, "tool_call_id", None)
     if tool_call_id:
         return (message.__class__.__name__, str(tool_call_id))
+    message_id = getattr(message, "id", None)
+    if message_id:
+        return (message.__class__.__name__, str(message_id))
     return (message.__class__.__name__, str(getattr(message, "content", message)))
 
 

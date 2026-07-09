@@ -27,6 +27,7 @@ from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph, add_messages
 from langgraph.runtime import Runtime
+from langgraph.utils.runnable import RunnableCallable
 from typing_extensions import Annotated, TypedDict
 
 from rai.agents.langchain.core.react_agent import (
@@ -178,10 +179,54 @@ def create_memory_react_agent(
                 "summary": state.get("summary", ""),
             }
 
+    async def arun_react(
+        state: MemoryState,
+        runtime: Runtime[MemoryAgentContext],
+        config: RunnableConfig,
+    ):
+        configurable = config.get("configurable", {})
+        try:
+            system_prompt = _inject_summary(
+                state["system_prompt"],
+                state.get("summary", ""),
+            )
+            conversation_messages = [
+                m for m in state["messages"] if not isinstance(m, SystemMessage)
+            ]
+            if runtime.context.transient_images:
+                conversation_messages = list(conversation_messages)
+                for index in range(len(conversation_messages) - 1, -1, -1):
+                    message = conversation_messages[index]
+                    if isinstance(message, HumanMessage):
+                        conversation_messages[index] = HumanMultimodalMessage(
+                            content=_message_text(message),
+                            images=runtime.context.transient_images,
+                        )
+                        break
+            react_messages = [
+                SystemMessage(content=system_prompt),
+                *conversation_messages,
+            ]
+            result = await inner_agent.ainvoke(
+                {"messages": react_messages},
+                RunnableConfig(
+                    callbacks=config.get("callbacks", []),
+                    configurable=configurable,
+                ),
+                context=runtime.context,
+            )
+            new_messages = list(result["messages"][len(react_messages) :])
+            return {"messages": new_messages, "summary": state.get("summary", "")}
+        except Exception as e:
+            return {
+                "messages": [AIMessage(content=f"Agent error: {e}")],
+                "summary": state.get("summary", ""),
+            }
+
     builder = StateGraph(MemoryState, context_schema=MemoryAgentContext)
     builder.add_node("enrich_prompt", enrich_prompt)
     builder.add_node("summarize", summarize_node)
-    builder.add_node("react", run_react)
+    builder.add_node("react", RunnableCallable(run_react, arun_react, name="react"))
 
     builder.add_edge(START, "enrich_prompt")
     builder.add_edge("enrich_prompt", "summarize")

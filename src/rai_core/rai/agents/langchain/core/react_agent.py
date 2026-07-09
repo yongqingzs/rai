@@ -29,10 +29,14 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import START, StateGraph
 from langgraph.prebuilt.tool_node import tools_condition
 from langgraph.store.base import BaseStore
+from langgraph.utils.runnable import RunnableCallable
 from typing_extensions import Annotated, TypedDict
 
 from rai.agents.langchain.core.tool_runner import ToolRunner
-from rai.agents.langchain.invocation_helpers import invoke_llm_with_tracing
+from rai.agents.langchain.invocation_helpers import (
+    ainvoke_llm_with_tracing,
+    invoke_llm_with_tracing,
+)
 from rai.initialization import get_llm_model
 from rai.messages import SystemMultimodalMessage
 
@@ -110,6 +114,30 @@ def llm_node(
     return {"messages": new_messages}
 
 
+async def allm_node(
+    llm: BaseChatModel,
+    system_prompt: Optional[str | SystemMultimodalMessage],
+    state: ReActAgentState,
+    config: RunnableConfig,
+):
+    """Async variant of ``llm_node`` used by LangGraph event streaming."""
+    new_messages: List[BaseMessage] = []
+    has_system = isinstance(state["messages"][0], SystemMessage)
+
+    if isinstance(system_prompt, SystemMultimodalMessage):
+        if not has_system:
+            new_messages.append(system_prompt)
+    elif system_prompt:
+        if not has_system:
+            new_messages.append(SystemMessage(content=system_prompt))
+
+    all_msgs = list(new_messages) + list(state["messages"])
+    ai_msg = await ainvoke_llm_with_tracing(llm, all_msgs, config)
+    new_messages.append(ai_msg)
+
+    return {"messages": new_messages}
+
+
 def create_react_runnable(
     llm: Optional[BaseChatModel] = None,
     tools: Optional[List[BaseTool]] = None,
@@ -150,12 +178,26 @@ def create_react_runnable(
         new_msgs = list(result["messages"][initial_len:])
         return {"messages": new_msgs}
 
+    async def _atool_runner_delta(tool_runner, state, config):
+        """Async wrapper for ToolRunner used by ``astream_events``."""
+        initial_len = len(state["messages"])
+        result = await tool_runner.ainvoke(state, config)
+        new_msgs = list(result["messages"][initial_len:])
+        return {"messages": new_msgs}
+
     graph = StateGraph(ReActAgentState)
     graph.add_edge(START, "llm")
 
     if tools:
         tool_runner = ToolRunner(tools)
-        graph.add_node("tools", partial(_tool_runner_delta, tool_runner))
+        graph.add_node(
+            "tools",
+            RunnableCallable(
+                partial(_tool_runner_delta, tool_runner),
+                partial(_atool_runner_delta, tool_runner),
+                name="tools",
+            ),
+        )
         graph.add_conditional_edges(
             "llm",
             tools_condition,
@@ -163,9 +205,23 @@ def create_react_runnable(
         graph.add_edge("tools", "llm")
         # Bind tools to LLM
         bound_llm = cast(BaseChatModel, llm.bind_tools(tools))
-        graph.add_node("llm", partial(llm_node, bound_llm, system_prompt))
+        graph.add_node(
+            "llm",
+            RunnableCallable(
+                partial(llm_node, bound_llm, system_prompt),
+                partial(allm_node, bound_llm, system_prompt),
+                name="llm",
+            ),
+        )
     else:
-        graph.add_node("llm", partial(llm_node, llm, system_prompt))
+        graph.add_node(
+            "llm",
+            RunnableCallable(
+                partial(llm_node, llm, system_prompt),
+                partial(allm_node, llm, system_prompt),
+                name="llm",
+            ),
+        )
 
     # Compile the graph
     return graph.compile(checkpointer=checkpointer, store=store)
