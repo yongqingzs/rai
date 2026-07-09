@@ -359,3 +359,22 @@ def test_ros2_connector_unique_names(ros_setup: None):
     finally:
         connector1.shutdown()
         connector2.shutdown()
+
+
+def test_ros2_connector_does_not_create_tf_listener_by_default(ros_setup: None):
+    connector = ROS2Connector()
+    try:
+        assert connector._tf_buffer is None
+        assert connector._tf_listener is None
+    finally:
+        connector.shutdown()
+
+
+def test_ros2_connector_can_create_tf_listener_on_init(ros_setup: None):
+    connector = ROS2Connector(enable_tf=True)
+    try:
+        assert connector._tf_buffer is not None
+        assert connector._tf_listener is not None
+    finally:
+        connector.shutdown()
+

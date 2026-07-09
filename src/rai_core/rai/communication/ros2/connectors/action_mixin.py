@@ -57,3 +57,6 @@ class ROS2ActionMixin:
 
     def terminate_action(self, action_handle: str, **kwargs: Any):
         return self._actions_api.terminate_goal(action_handle)
+
+    def release_action(self, action_handle: str, **kwargs: Any) -> bool:
+        return self._actions_api.release_goal(action_handle)

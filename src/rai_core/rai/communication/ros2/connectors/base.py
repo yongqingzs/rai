@@ -58,6 +58,9 @@ class ROS2BaseConnector(ROS2ActionMixin, ROS2ServiceMixin, BaseConnector[T]):
         Type of executor to use for processing ROS2 callbacks, by default "multi_threaded".
     use_sim_time : bool, optional
         Whether to use simulation time or system time, by default False.
+    enable_tf : bool, optional
+        Whether to create a TF listener during connector initialization, by default False.
+        If False, TF support is initialized lazily on the first get_transform call.
 
     Methods
     -------
@@ -104,6 +107,7 @@ class ROS2BaseConnector(ROS2ActionMixin, ROS2ServiceMixin, BaseConnector[T]):
         destroy_subscribers: bool = False,
         executor_type: Literal["single_threaded", "multi_threaded"] = "multi_threaded",
         use_sim_time: bool = False,
+        enable_tf: bool = False,
     ):
         """Initialize the ROS2BaseConnector.
 
@@ -115,6 +119,8 @@ class ROS2BaseConnector(ROS2ActionMixin, ROS2ServiceMixin, BaseConnector[T]):
             Whether to destroy subscribers after receiving a message, by default False.
         executor_type : Literal["single_threaded", "multi_threaded"], optional
             Type of executor to use for processing ROS2 callbacks, by default "multi_threaded".
+        enable_tf : bool, optional
+            Whether to create a TF listener during connector initialization, by default False.
 
         Raises
         ------
@@ -139,8 +145,10 @@ class ROS2BaseConnector(ROS2ActionMixin, ROS2ServiceMixin, BaseConnector[T]):
         self._topic_api = ROS2TopicAPI(self._node, destroy_subscribers)
         self._service_api = ROS2ServiceAPI(self._node)
         self._actions_api = ROS2ActionAPI(self._node)
-        self._tf_buffer = Buffer(node=self._node)
-        self._tf_listener = TransformListener(self._tf_buffer, self._node)
+        self._tf_buffer: Buffer | None = None
+        self._tf_listener: TransformListener | None = None
+        if enable_tf:
+            self._ensure_tf_listener()
 
         self._executor_performance_time_delta = 1.0
         self._executor_performance_timer = self._node.create_timer(
@@ -165,6 +173,12 @@ class ROS2BaseConnector(ROS2ActionMixin, ROS2ServiceMixin, BaseConnector[T]):
 
         # cache for last received messages
         self.last_msg: Dict[str, T] = {}
+
+    def _ensure_tf_listener(self) -> Buffer:
+        if self._tf_buffer is None:
+            self._tf_buffer = Buffer(node=self._node)
+            self._tf_listener = TransformListener(self._tf_buffer, self._node)
+        return self._tf_buffer
 
     def _executor_performance_callback(self) -> None:
         """Monitor executor performance and log warnings if it falls behind schedule.
@@ -457,14 +471,15 @@ class ROS2BaseConnector(ROS2ActionMixin, ROS2ServiceMixin, BaseConnector[T]):
         LookupException
             If the transform is not available within the timeout period.
         """
+        tf_buffer = self._ensure_tf_listener()
         transform_available = self.wait_for_transform(
-            self._tf_buffer, target_frame, source_frame, timeout_sec
+            tf_buffer, target_frame, source_frame, timeout_sec
         )
         if not transform_available:
             raise LookupException(
                 f"Could not find transform from {source_frame} to {target_frame} in {timeout_sec} seconds"
             )
-        transform: TransformStamped = self._tf_buffer.lookup_transform(
+        transform: TransformStamped = tf_buffer.lookup_transform(
             target_frame,
             source_frame,
             rclpy.time.Time(),
@@ -557,16 +572,16 @@ class ROS2BaseConnector(ROS2ActionMixin, ROS2ServiceMixin, BaseConnector[T]):
         """Shutdown the connector and clean up resources.
 
         This method:
-        1. Unregisters the TF listener
-        2. Destroys the ROS2 node
-        3. Shuts down the action API
-        4. Shuts down the topic API
-        5. Shuts down the executor
-        6. Joins the executor thread
+        1. Unregisters the TF listener if it was created
+        2. Shuts down action and topic resources
+        3. Destroys the ROS2 node
+        4. Shuts down the executor
+        5. Joins the executor thread
         """
-        self._tf_listener.unregister()
-        self._node.destroy_node()
+        if self._tf_listener is not None:
+            self._tf_listener.unregister()
         self._actions_api.shutdown()
         self._topic_api.shutdown()
+        self._node.destroy_node()
         self._executor.shutdown()
         self._thread.join()

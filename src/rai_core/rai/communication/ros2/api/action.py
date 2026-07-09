@@ -218,7 +218,9 @@ class ROS2ActionAPI(BaseROS2API):
         )
 
         action_client = ActionClient(self.node, action_cls, action_name)
+        self.actions[handle]["action_client"] = action_client
         if not action_client.wait_for_server(timeout_sec=timeout_sec):  # type: ignore
+            self.release_goal(handle)
             return False, ""
 
         feedback_callbacks = [
@@ -229,7 +231,6 @@ class ROS2ActionAPI(BaseROS2API):
             goal=action_goal,
             feedback_callback=partial(self._fan_out_feedback, feedback_callbacks),
         )
-        self.actions[handle]["action_client"] = action_client
         self.actions[handle]["goal_future"] = send_goal_future
 
         goal_handle = cast(
@@ -237,6 +238,7 @@ class ROS2ActionAPI(BaseROS2API):
             get_future_result(send_goal_future, timeout_sec=timeout_sec),
         )
         if goal_handle is None:
+            self.release_goal(handle)
             return False, ""
 
         get_result_future = cast(Future, goal_handle.get_result_async())  # type: ignore
@@ -273,10 +275,21 @@ class ROS2ActionAPI(BaseROS2API):
             raise ValueError(f"No result available for goal {handle}")
         return self.actions[handle]["result_future"].result()
 
+    def release_goal(self, handle: str) -> bool:
+        action_data = self.actions.pop(handle, None)
+        if action_data is None:
+            return False
+        action_client = action_data.get("action_client")
+        if action_client is not None and hasattr(action_client, "destroy"):
+            action_client.destroy()
+        return True
+
     def get_action_names_and_types(self) -> List[Tuple[str, List[str]]]:
         return rclpy.action.get_action_names_and_types(self.node)
 
     def shutdown(self) -> None:
-        """Cleanup thread pool when object is destroyed."""
+        """Cleanup action clients and thread pool when object is destroyed."""
+        for handle in list(self.actions):
+            self.release_goal(handle)
         if hasattr(self, "_callback_executor"):
             self._callback_executor.shutdown(wait=False)
