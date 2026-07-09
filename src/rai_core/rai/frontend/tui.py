@@ -79,21 +79,21 @@ class ChatTextArea(TextArea):
             else:
                 self.app.exit()
             return
-        if getattr(self.app, "_session_picker", None):
+        if self.app._has_active_picker():
             if event.key == "enter":
                 event.stop()
                 event.prevent_default()
-                self.app._resume_selected_session()
+                self.app._confirm_picker_selection()
                 return
             if event.key == "up":
                 event.stop()
                 event.prevent_default()
-                self.app._move_session_picker(-1)
+                self.app._move_picker_selection(-1)
                 return
             if event.key == "down":
                 event.stop()
                 event.prevent_default()
-                self.app._move_session_picker(1)
+                self.app._move_picker_selection(1)
                 return
             if event.key == "escape":
                 event.stop()
@@ -273,8 +273,12 @@ class MemoryTuiApp(App):
         super().__init__()
         self.session = session
         self._status = "idle"
+        self._picker_mode: str | None = None
         self._session_picker: list[SessionSummary] = []
         self._session_picker_index = 0
+        self._memory_picker: list[tuple[str, Any, str, Any]] = []
+        self._memory_picker_index = 0
+        self._memory_picker_kind = ""
         self._last_assistant_text = ""
         self._last_activity_status = ""
         self._turn_started_at: float | None = None
@@ -317,16 +321,16 @@ class MemoryTuiApp(App):
         self.query_one("#input", ChatTextArea).focus()
 
     def on_key(self, event) -> None:
-        if not self._session_picker:
+        if not self._has_active_picker():
             return
         if event.key == "up":
-            self._move_session_picker(-1)
+            self._move_picker_selection(-1)
             event.stop()
         elif event.key == "down":
-            self._move_session_picker(1)
+            self._move_picker_selection(1)
             event.stop()
         elif event.key == "enter":
-            self._resume_selected_session()
+            self._confirm_picker_selection()
             event.stop()
         elif event.key == "escape":
             self._clear_command_panel()
@@ -341,6 +345,15 @@ class MemoryTuiApp(App):
         self._clear_command_panel()
         if value in {"/resume", "/session"}:
             self._show_session_picker()
+            return
+        if value == "/delete-session":
+            self._show_delete_session_picker()
+            return
+        if value == "/delete-memory":
+            self._show_delete_memory_picker()
+            return
+        if value in {"/delete-memory facts", "/delete-memory locations"}:
+            self._show_delete_memory_picker(value.rsplit(" ", maxsplit=1)[1])
             return
         if value == "/copy-last":
             self._copy_last_assistant_message()
@@ -625,8 +638,8 @@ class MemoryTuiApp(App):
         self._show_notice(
             "Commands: /help, /status, /tools, /new, /sessions, /resume, "
             "/resume <thread_id> [--quiet], /session, /users, /user <id>, "
-            "/memory, /memory facts, /memory locations, /delete-session <thread_id>, "
-            "/delete-memory <facts|locations> <key>, /delete-user <user_id>, "
+            "/memory, /memory facts, /memory locations, /delete-session [thread_id], "
+            "/delete-memory [facts|locations] [key], /delete-user <user_id>, "
             "/clear, /export-session <path>, /copy-last, /copy-transcript, /log, /exit"
         )
 
@@ -635,6 +648,7 @@ class MemoryTuiApp(App):
         self._show_panel(table)
 
     def _show_session_picker(self) -> None:
+        self._picker_mode = "resume"
         self._session_picker = self.session.list_session_summaries()
         self._session_picker_index = 0
         if not self._session_picker:
@@ -642,13 +656,57 @@ class MemoryTuiApp(App):
             return
         self._render_session_picker()
 
-    def _move_session_picker(self, delta: int) -> None:
+    def _show_delete_session_picker(self) -> None:
+        self._picker_mode = "delete-session"
+        self._session_picker = self.session.list_session_summaries()
+        self._session_picker_index = 0
         if not self._session_picker:
+            self._show_notice("No sessions.")
             return
-        self._session_picker_index = (self._session_picker_index + delta) % len(
-            self._session_picker
-        )
         self._render_session_picker()
+
+    def _show_delete_memory_picker(self, kind: str | None = None) -> None:
+        self._picker_mode = "delete-memory"
+        self._memory_picker_kind = kind or ""
+        self._memory_picker = self.session.list_long_term_memory(kind)
+        self._memory_picker_index = 0
+        if not self._memory_picker:
+            suffix = f" ({kind})" if kind else ""
+            self._show_notice(f"No memory items{suffix}.")
+            return
+        self._render_memory_picker()
+
+    def _has_active_picker(self) -> bool:
+        if self._picker_mode in {"resume", "delete-session"}:
+            return bool(self._session_picker)
+        if self._picker_mode == "delete-memory":
+            return bool(self._memory_picker)
+        return False
+
+    def _move_picker_selection(self, delta: int) -> None:
+        if self._picker_mode in {"resume", "delete-session"}:
+            if not self._session_picker:
+                return
+            self._session_picker_index = (self._session_picker_index + delta) % len(
+                self._session_picker
+            )
+            self._render_session_picker()
+            return
+        if self._picker_mode == "delete-memory":
+            if not self._memory_picker:
+                return
+            self._memory_picker_index = (self._memory_picker_index + delta) % len(
+                self._memory_picker
+            )
+            self._render_memory_picker()
+
+    def _confirm_picker_selection(self) -> None:
+        if self._picker_mode == "resume":
+            self._resume_selected_session()
+        elif self._picker_mode == "delete-session":
+            self._delete_selected_session()
+        elif self._picker_mode == "delete-memory":
+            self._delete_selected_memory()
 
     def _resume_selected_session(self) -> None:
         if not self._session_picker:
@@ -656,6 +714,21 @@ class MemoryTuiApp(App):
         summary = self._session_picker[self._session_picker_index]
         self._clear_command_panel()
         self._start_resume_by_value(summary.thread_id)
+
+    def _delete_selected_session(self) -> None:
+        if not self._session_picker:
+            return
+        summary = self._session_picker[self._session_picker_index]
+        self._clear_command_panel()
+        self._show_notice(self.session.delete_session(summary.thread_id))
+
+    def _delete_selected_memory(self) -> None:
+        if not self._memory_picker:
+            return
+        schema, _ns, key, _value = self._memory_picker[self._memory_picker_index]
+        kind = self._memory_picker_kind or schema
+        self._clear_command_panel()
+        self._show_notice(self.session.delete_long_term_memory(kind, key))
 
     def _start_resume_by_value(self, value: str) -> None:
         self.run_worker(
@@ -674,7 +747,11 @@ class MemoryTuiApp(App):
         self._refresh_status("idle")
 
     def _render_session_picker(self) -> None:
-        table = Table(title="Resume Session - Up/Down select, Enter resume, Esc cancel")
+        if self._picker_mode == "delete-session":
+            title = "Delete Session - Up/Down select, Enter delete, Esc cancel"
+        else:
+            title = "Resume Session - Up/Down select, Enter resume, Esc cancel"
+        table = Table(title=title)
         table.add_column("")
         table.add_column("Created")
         table.add_column("First message")
@@ -685,6 +762,28 @@ class MemoryTuiApp(App):
                 summary.created_at_display,
                 summary.first_user_message or "(empty)",
                 summary.thread_id,
+            )
+        self._show_panel(table)
+
+    def _render_memory_picker(self) -> None:
+        if self._memory_picker_kind:
+            title = (
+                f"Delete Memory: {self._memory_picker_kind} - "
+                "Up/Down select, Enter delete, Esc cancel"
+            )
+        else:
+            title = "Delete Memory - Up/Down select, Enter delete, Esc cancel"
+        table = Table(title=title)
+        table.add_column("")
+        table.add_column("Type")
+        table.add_column("Key")
+        table.add_column("Value")
+        for index, (schema, _ns, key, value) in enumerate(self._memory_picker):
+            table.add_row(
+                ">" if index == self._memory_picker_index else "",
+                schema,
+                key,
+                format_long_term_item(schema, key, value),
             )
         self._show_panel(table)
 
@@ -731,7 +830,12 @@ class MemoryTuiApp(App):
         panel.scroll_home(animate=False, immediate=True)
 
     def _clear_command_panel(self) -> None:
+        self._picker_mode = None
         self._session_picker = []
+        self._session_picker_index = 0
+        self._memory_picker = []
+        self._memory_picker_index = 0
+        self._memory_picker_kind = ""
         panel = self.query_one("#command_panel", VerticalScroll)
         content = self.query_one("#command_panel_content", Static)
         content.update("")

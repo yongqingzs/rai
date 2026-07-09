@@ -1365,6 +1365,170 @@ def test_memory_tui_app_resume_picker_resumes_selected_session():
     asyncio.run(run_test())
 
 
+def test_memory_tui_app_delete_session_picker_deletes_selected_session():
+    async def run_test():
+        memory_mgr = _FakeMemoryManager()
+        memory_mgr.store.put(
+            ("inspection", "__sessions__", "metadata"),
+            "session-a",
+            {
+                "thread_id": "session-a",
+                "created_at": 1.0,
+                "updated_at": 1.0,
+                "first_user_message": "first",
+            },
+        )
+        memory_mgr.store.put(
+            ("inspection", "__sessions__", "metadata"),
+            "session-b",
+            {
+                "thread_id": "session-b",
+                "created_at": 2.0,
+                "updated_at": 2.0,
+                "first_user_message": "second",
+            },
+        )
+        session = MemoryCliSession(
+            memory_mgr=memory_mgr,
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press(
+                "/",
+                "d",
+                "e",
+                "l",
+                "e",
+                "t",
+                "e",
+                "-",
+                "s",
+                "e",
+                "s",
+                "s",
+                "i",
+                "o",
+                "n",
+                "enter",
+            )
+            assert app._picker_mode == "delete-session"
+            assert app._session_picker
+            assert (
+                app._session_picker[app._session_picker_index].thread_id == "session-b"
+            )
+            await pilot.press("down", "enter")
+            assert memory_mgr.checkpointer.deleted_threads == ["session-a"]
+            assert (
+                ("inspection", "__sessions__", "metadata"),
+                "session-a",
+            ) in memory_mgr.store.deleted
+            assert app._picker_mode is None
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_delete_memory_picker_deletes_selected_fact():
+    async def run_test():
+        memory_mgr = _FakeMemoryManager()
+        session = MemoryCliSession(
+            memory_mgr=memory_mgr,
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press(
+                "/",
+                "d",
+                "e",
+                "l",
+                "e",
+                "t",
+                "e",
+                "-",
+                "m",
+                "e",
+                "m",
+                "o",
+                "r",
+                "y",
+                " ",
+                "f",
+                "a",
+                "c",
+                "t",
+                "s",
+                "enter",
+            )
+            assert app._picker_mode == "delete-memory"
+            assert app._memory_picker_kind == "facts"
+            assert app._memory_picker
+            await pilot.press("enter")
+            assert memory_mgr.store.deleted == [
+                (("inspection", "operator", "facts"), "fact-1")
+            ]
+            assert app._picker_mode is None
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_delete_memory_picker_deletes_selected_location():
+    async def run_test():
+        memory_mgr = _FakeMemoryManager()
+        session = MemoryCliSession(
+            memory_mgr=memory_mgr,
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press(
+                "/",
+                "d",
+                "e",
+                "l",
+                "e",
+                "t",
+                "e",
+                "-",
+                "m",
+                "e",
+                "m",
+                "o",
+                "r",
+                "y",
+                " ",
+                "l",
+                "o",
+                "c",
+                "a",
+                "t",
+                "i",
+                "o",
+                "n",
+                "s",
+                "enter",
+            )
+            assert app._picker_mode == "delete-memory"
+            assert app._memory_picker_kind == "locations"
+            assert app._memory_picker
+            await pilot.press("enter")
+            assert memory_mgr.store.deleted == [
+                (("inspection", "operator", "spatial"), "point1")
+            ]
+            assert app._picker_mode is None
+
+    asyncio.run(run_test())
+
+
 def test_memory_tui_app_quiet_resume_does_not_render_history():
     async def run_test():
         graph = _FakeGraph()
