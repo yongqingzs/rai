@@ -16,6 +16,7 @@ from textual.containers import VerticalScroll
 from textual.message import Message
 from textual.theme import Theme
 from textual.widgets import Header, Markdown, Static, TextArea
+from textual.worker import WorkerState, get_current_worker
 
 from rai.frontend.cli import (
     CliAgentEvent,
@@ -34,10 +35,10 @@ RAI_AGENT_THEME = Theme(
     secondary="#6f8796",
     accent="#7bb7a7",
     foreground="#d7dde2",
-    background="#0d1114",
-    surface="#141a1f",
-    panel="#192127",
-    boost="#202a31",
+    background="#1e1e1e",
+    surface="#252526",
+    panel="#2d2d30",
+    boost="#333337",
     success="#86c39a",
     warning="#d7b46a",
     error="#d06f6f",
@@ -45,12 +46,12 @@ RAI_AGENT_THEME = Theme(
     variables={
         "block-cursor-text-style": "none",
         "input-cursor-background": "#c8d5dc",
-        "input-cursor-foreground": "#0d1114",
+        "input-cursor-foreground": "#1e1e1e",
         "input-selection-background": "#355263 70%",
-        "scrollbar": "#29343c",
-        "scrollbar-hover": "#35434d",
-        "scrollbar-active": "#50616d",
-        "scrollbar-background": "#101519",
+        "scrollbar": "#3a3d41",
+        "scrollbar-hover": "#4b4f54",
+        "scrollbar-active": "#60666c",
+        "scrollbar-background": "#252526",
     },
 )
 
@@ -68,6 +69,11 @@ class ChatTextArea(TextArea):
         if event.key == "ctrl+c":
             event.stop()
             event.prevent_default()
+            if self.app._copy_selected_text():
+                return
+            if self.app._is_agent_running():
+                self.app._cancel_agent_turn()
+                return
             if self.text:
                 self.load_text("")
             else:
@@ -94,6 +100,16 @@ class ChatTextArea(TextArea):
                 event.prevent_default()
                 self.app._clear_command_panel()
                 return
+        if event.key == "up":
+            event.stop()
+            event.prevent_default()
+            self.app._recall_input_history(-1)
+            return
+        if event.key == "down":
+            event.stop()
+            event.prevent_default()
+            self.app._recall_input_history(1)
+            return
         if event.key == "enter":
             event.stop()
             event.prevent_default()
@@ -113,24 +129,32 @@ class MemoryTuiApp(App):
     CSS = """
     Screen {
         layout: vertical;
-        background: #0d1114;
+        background: #1e1e1e;
         color: #d7dde2;
+    }
+
+    Screen > .screen--selection {
+        background: #0e639c;
+        color: #ffffff;
+        text-style: bold;
     }
 
     #conversation {
         height: 1fr;
-        border: tall #27323a;
+        border: tall #3a3d41;
         padding: 1 1;
-        background: #0d1114;
+        background: #1e1e1e;
     }
 
     #command_panel {
         height: auto;
-        max-height: 12;
+        max-height: 45vh;
         padding: 0 1;
-        border: round #44525c;
-        background: #182027;
+        border: round #4b4f54;
+        background: #252526;
         color: #d7dde2;
+        overflow-y: auto;
+        scrollbar-gutter: stable;
     }
 
     #command_panel.hidden {
@@ -141,28 +165,29 @@ class MemoryTuiApp(App):
         height: auto;
         min-height: 1;
         max-height: 6;
-        border: tall #34424b;
-        background: #11171b;
+        border: tall #3a3d41;
+        background: #252526;
         color: #dde4e8;
     }
 
     ChatTextArea:focus {
         border: tall #6f9eb4;
-        background: #131b20;
+        background: #2d2d30;
     }
 
     ChatTextArea .text-area--cursor {
         background: #c8d5dc;
-        color: #0d1114;
+        color: #1e1e1e;
         text-style: none;
     }
 
     ChatTextArea .text-area--selection {
-        background: #355263 70%;
+        background: #0e639c;
+        color: #ffffff;
     }
 
     ChatTextArea .text-area--cursor-line {
-        background: #182128;
+        background: #2d2d30;
     }
 
     ChatTextArea .text-area--placeholder {
@@ -173,38 +198,38 @@ class MemoryTuiApp(App):
         width: 100%;
         margin: 1 0 1 0;
         padding: 1 2;
-        border: round #2f3a42;
-        background: #182027;
+        border: round #3a3d41;
+        background: #252526;
         color: #d7dde2;
     }
 
     .message.user {
         color: #e6edf1;
         border-left: solid #6f8796;
-        border-top: solid #2f3a42;
-        border-right: solid #2f3a42;
-        border-bottom: solid #2f3a42;
+        border-top: solid #3a3d41;
+        border-right: solid #3a3d41;
+        border-bottom: solid #3a3d41;
         border-title-color: #9ed0ff;
-        background: #171f26;
+        background: #252526;
     }
 
     .message.assistant {
         color: #d7dde2;
         border-left: solid #7bb7a7;
-        border-top: solid #334048;
-        border-right: solid #334048;
-        border-bottom: solid #334048;
+        border-top: solid #3a3d41;
+        border-right: solid #3a3d41;
+        border-bottom: solid #3a3d41;
         border-title-color: #8fe3c2;
-        background: #1b242b;
+        background: #2d2d30;
     }
 
     .message.system {
         color: #8f9ba4;
         border-left: solid #34424b;
-        border-top: solid #283138;
-        border-right: solid #283138;
-        border-bottom: solid #283138;
-        background: #141a1f;
+        border-top: solid #333337;
+        border-right: solid #333337;
+        border-bottom: solid #333337;
+        background: #252526;
     }
 
     .message.tool {
@@ -213,7 +238,7 @@ class MemoryTuiApp(App):
         border-top: solid #3b382a;
         border-right: solid #3b382a;
         border-bottom: solid #3b382a;
-        background: #1c211d;
+        background: #2a2a25;
     }
 
     .message.activity {
@@ -221,19 +246,18 @@ class MemoryTuiApp(App):
         margin: 0 0 1 0;
         padding: 0 1;
         border: none;
-        background: #0d1114;
+        background: #1e1e1e;
     }
 
     #agent_status {
         height: 1;
         padding: 0 1;
-        background: #0d1114;
+        background: #1e1e1e;
         color: #7f8c95;
     }
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "quit", "Quit", show=False),
         Binding("ctrl+q", "quit", "Quit", show=False),
         Binding("ctrl+l", "clear_conversation", "Clear", show=False),
         Binding("ctrl+shift+c", "copy_transcript", "Copy transcript", show=False),
@@ -259,13 +283,27 @@ class MemoryTuiApp(App):
         self._working_transcript_index: int | None = None
         self._tool_activity_widgets: dict[str, tuple[Static, str]] = {}
         self._realtime_tool_result_ids: set[str] = set()
+        self._agent_worker: Any | None = None
+        self._turn_sequence = 0
+        self._active_turn_id: int | None = None
+        self._canceled_turn_ids: set[int] = set()
+        self._interrupted_turn_ids: set[int] = set()
+        self._input_history: list[str] = []
+        self._input_history_index: int | None = None
+        self._input_history_draft = ""
+        self._last_copy_panel_title = ""
+        self._last_copy_panel_status = ""
+        self._last_copy_panel_text = ""
+        self._supports_pyperclip: bool | None = None
+        self._last_copy_system_target = ""
         self._transcript: list[str] = []
         self.log_path = Path(log_path).expanduser() if log_path is not None else None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield VerticalScroll(id="conversation")
-        yield Static("", id="command_panel", classes="hidden")
+        with VerticalScroll(id="command_panel", classes="hidden"):
+            yield Static("", id="command_panel_content")
         yield ChatTextArea(id="input")
         yield Static(self._status_text(), id="agent_status")
 
@@ -299,6 +337,7 @@ class MemoryTuiApp(App):
         event.text_area.load_text("")
         if not value:
             return
+        self._remember_input(value)
         self._clear_command_panel()
         if value in {"/resume", "/session"}:
             self._show_session_picker()
@@ -334,12 +373,81 @@ class MemoryTuiApp(App):
         if not transcript:
             self._show_notice("No transcript to copy.")
             return
-        copy_to_clipboard = getattr(self, "copy_to_clipboard", None)
-        if callable(copy_to_clipboard):
-            copy_to_clipboard(transcript)
-            self._show_notice("Copied transcript to clipboard.")
+        self._copy_text_with_fallback(transcript, title="Transcript")
+
+    def copy_to_clipboard(self, text: str) -> None:
+        self._last_copy_system_target = ""
+        if self._supports_pyperclip is None:
+            try:
+                import pyperclip  # noqa: F401
+            except ImportError:
+                self._supports_pyperclip = False
+            else:
+                self._supports_pyperclip = True
+
+        if self._supports_pyperclip:
+            try:
+                import pyperclip
+
+                pyperclip.copy(text)
+            except Exception:
+                pass
+            else:
+                self._last_copy_system_target = "pyperclip"
+        super().copy_to_clipboard(text)
+
+    def _copy_selected_text(self) -> bool:
+        selected_text = self.screen.get_selected_text()
+        if selected_text is None:
+            return False
+        self._copy_text_with_fallback(selected_text, title="Selection")
+        self.screen.clear_selection()
+        return True
+
+    def _copy_text_with_fallback(self, text: str, *, title: str = "Copy") -> None:
+        local_clipboard = False
+        osc52_requested = False
+        try:
+            osc52_requested = self._has_terminal_clipboard()
+            self.copy_to_clipboard(text)
+            local_clipboard = True
+        except Exception:
+            pass
+        if self._last_copy_system_target:
+            status = (
+                f"Copied to system clipboard via {self._last_copy_system_target}. "
+                "If paste fails, copy from the text below."
+            )
+        elif osc52_requested:
+            status = (
+                "Terminal clipboard copy requested. If external paste fails, your "
+                "terminal or SSH session likely blocks OSC52; copy from the text below."
+            )
+        elif local_clipboard:
+            status = (
+                "Copied to TUI local clipboard only. External apps cannot paste this; "
+                "copy from the text below."
+            )
         else:
-            self._show_notice("Clipboard API is unavailable. Use /log.")
+            status = (
+                "Automatic clipboard copy is unavailable. Copy from the text below."
+            )
+        self._show_copy_panel(title, status, text)
+
+    def _has_terminal_clipboard(self) -> bool:
+        return getattr(self, "_driver", None) is not None
+
+    def _show_copy_panel(self, title: str, status: str, text: str) -> None:
+        self._last_copy_panel_title = title
+        self._last_copy_panel_status = status
+        self._last_copy_panel_text = text
+        self._show_panel(
+            Panel(
+                Text(f"{status}\n\n{text}", style="#d7dde2"),
+                title=title,
+                border_style="#7bb7a7",
+            )
+        )
 
     def _handle_command(self, command: CliCommandResult) -> None:
         message = command.message
@@ -399,21 +507,36 @@ class MemoryTuiApp(App):
     def _submit_turn(self, turn: CliTurn) -> None:
         self._write_user(turn.text)
         self._start_turn_timeline()
-        self._run_agent(turn)
+        self._turn_sequence += 1
+        self._active_turn_id = self._turn_sequence
+        self._agent_worker = self._run_agent(turn, self._active_turn_id)
 
     @work(thread=True)
-    def _run_agent(self, turn: CliTurn) -> None:
+    def _run_agent(self, turn: CliTurn, turn_id: int) -> None:
+        worker = get_current_worker()
         try:
             for event in self.session.stream_events(turn):
-                self.call_from_thread(self._handle_agent_event, event)
+                if worker.state == WorkerState.CANCELLED or self._is_turn_canceled(
+                    turn_id
+                ):
+                    self.call_from_thread(self._finish_turn_interrupted, turn_id)
+                    return
+                self.call_from_thread(self._handle_agent_event, turn_id, event)
+            if worker.state == WorkerState.CANCELLED or self._is_turn_canceled(turn_id):
+                self.call_from_thread(self._finish_turn_interrupted, turn_id)
         except Exception as e:
+            if self._is_turn_canceled(turn_id):
+                self.call_from_thread(self._finish_turn_interrupted, turn_id)
+                return
             self.call_from_thread(
                 self._write_conversation_system,
                 f"Agent invocation failed: {type(e).__name__}: {e}",
             )
             self.call_from_thread(self._finish_turn_timeline, False)
 
-    def _handle_agent_event(self, event: CliAgentEvent) -> None:
+    def _handle_agent_event(self, turn_id: int, event: CliAgentEvent) -> None:
+        if self._is_turn_canceled(turn_id) or turn_id != self._active_turn_id:
+            return
         if event.kind == "status":
             self._handle_status_event(event)
             self._refresh_status(self._agent_status_label(event.status))
@@ -424,6 +547,59 @@ class MemoryTuiApp(App):
         if event.kind == "done":
             self._finish_turn_timeline(True)
             return
+
+    def _remember_input(self, value: str) -> None:
+        if not self._input_history or self._input_history[-1] != value:
+            self._input_history.append(value)
+        self._input_history_index = None
+        self._input_history_draft = ""
+
+    def _recall_input_history(self, direction: int) -> None:
+        if not self._input_history:
+            return
+        text_area = self.query_one("#input", ChatTextArea)
+        if self._input_history_index is None:
+            if direction > 0:
+                return
+            self._input_history_draft = text_area.text
+            self._input_history_index = len(self._input_history) - 1
+        else:
+            self._input_history_index += direction
+            if self._input_history_index < 0:
+                self._input_history_index = 0
+            elif self._input_history_index >= len(self._input_history):
+                self._input_history_index = None
+                self._load_input_text(self._input_history_draft)
+                return
+        self._load_input_text(self._input_history[self._input_history_index])
+
+    def _load_input_text(self, value: str) -> None:
+        text_area = self.query_one("#input", ChatTextArea)
+        text_area.load_text(value)
+        lines = value.splitlines() or [""]
+        text_area.move_cursor((len(lines) - 1, len(lines[-1])))
+
+    def _is_agent_running(self) -> bool:
+        if self._turn_started_at is None:
+            return False
+        if self._agent_worker is None:
+            return True
+        return self._agent_worker.state in {WorkerState.PENDING, WorkerState.RUNNING}
+
+    def _is_turn_canceled(self, turn_id: int) -> bool:
+        return turn_id in self._canceled_turn_ids
+
+    def _cancel_agent_turn(self) -> None:
+        if not self._is_agent_running():
+            return
+        turn_id = self._active_turn_id
+        if turn_id is None:
+            return
+        self._canceled_turn_ids.add(turn_id)
+        worker = self._agent_worker
+        if worker is not None:
+            worker.cancel()
+        self._finish_turn_interrupted(turn_id)
 
     def _write_messages(self, messages: Iterable[Any]) -> None:
         for message in messages:
@@ -548,14 +724,17 @@ class MemoryTuiApp(App):
         self._show_panel(Panel(message, title="Command", border_style="cyan"))
 
     def _show_panel(self, renderable: Any) -> None:
-        panel = self.query_one("#command_panel", Static)
-        panel.update(renderable)
+        panel = self.query_one("#command_panel", VerticalScroll)
+        content = self.query_one("#command_panel_content", Static)
+        content.update(renderable)
         panel.remove_class("hidden")
+        panel.scroll_home(animate=False, immediate=True)
 
     def _clear_command_panel(self) -> None:
         self._session_picker = []
-        panel = self.query_one("#command_panel", Static)
-        panel.update("")
+        panel = self.query_one("#command_panel", VerticalScroll)
+        content = self.query_one("#command_panel_content", Static)
+        content.update("")
         panel.add_class("hidden")
 
     def _write_conversation_system(self, message: str) -> None:
@@ -595,15 +774,7 @@ class MemoryTuiApp(App):
         if not self._last_assistant_text:
             self._show_notice("No assistant message to copy.")
             return
-        copy_to_clipboard = getattr(self, "copy_to_clipboard", None)
-        if callable(copy_to_clipboard):
-            copy_to_clipboard(self._last_assistant_text)
-            self._show_notice("Copied last assistant message to clipboard.")
-        else:
-            self._show_notice(
-                "Clipboard API is unavailable in this terminal. Use /log or "
-                "/export-session <path>."
-            )
+        self._copy_text_with_fallback(self._last_assistant_text, title="Assistant")
 
     def _show_log_status(self) -> None:
         if self.log_path is None:
@@ -730,6 +901,28 @@ class MemoryTuiApp(App):
         self._turn_started_at = None
         self._working_widget = None
         self._working_transcript_index = None
+        self._agent_worker = None
+        self._active_turn_id = None
+
+    def _finish_turn_interrupted(self, turn_id: int) -> None:
+        if turn_id in self._interrupted_turn_ids:
+            return
+        self._interrupted_turn_ids.add(turn_id)
+        elapsed = self._turn_elapsed_text()
+        self._stop_turn_timer()
+        text = f"• Interrupted after {elapsed}"
+        self._update_working_activity(
+            text, self._timeline_text("Interrupted after", elapsed, style="#d7b46a")
+        )
+        self._append_log("activity", text)
+        if turn_id == self._active_turn_id:
+            self._refresh_status("interrupted")
+            self._turn_started_at = None
+            self._working_widget = None
+            self._working_transcript_index = None
+            self._agent_worker = None
+            self._active_turn_id = None
+        self._scroll_conversation_end()
 
     def _refresh_working_status(self) -> None:
         if self._turn_started_at is not None:
@@ -906,10 +1099,11 @@ class MemoryTuiApp(App):
         self.query_one("#agent_status", Static).update(self._status_text())
 
     def _status_text(self) -> str:
+        ctrl_c_action = "interrupt" if self._is_agent_running() else "clear/exit"
         return (
             f"user={self.session.user_id} | namespace={self.session.namespace} | "
             f"thread={self.session.thread_id} | "
-            "Enter send | Shift+Enter newline | Ctrl+C clear/exit | /resume"
+            f"Enter send | Shift+Enter newline | Ctrl+C {ctrl_c_action} | /resume"
         )
 
     def _conversation(self) -> VerticalScroll:

@@ -45,6 +45,7 @@ dependencies = [
     "numpy<2.0",
     "httpx[socks]>=0.28.1",
     "textual>=6.0.0,<7.0.0",
+    "pyperclip>=1.11.0,<2.0.0",
 ]
 
 [project.scripts]

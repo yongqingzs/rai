@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +25,8 @@ from rai.memory.manager import MemoryManager
 from textual import events
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
-from textual.widgets import Markdown, RichLog
+from textual.selection import SELECT_ALL
+from textual.widgets import Markdown, RichLog, Static
 
 
 async def _wait_for_transcript(
@@ -754,11 +756,15 @@ def test_memory_tui_app_uses_neutral_agent_theme():
 
         async with app.run_test():
             assert app.theme == RAI_AGENT_THEME.name
+            assert RAI_AGENT_THEME.background == "#1e1e1e"
             assert "ChatTextArea {\n        height: auto;" in app.CSS
             assert (
                 "ChatTextArea {\n        height: auto;\n        min-height: 1;\n        max-height: 6;\n        border: tall #34424b;"
-                in app.CSS
+                not in app.CSS
             )
+            assert "border: tall #3a3d41;" in app.CSS
+            assert "background: #1e1e1e;" in app.CSS
+            assert "background: #252526;" in app.CSS
             assert "ChatTextArea:focus" in app.CSS
             chat_text_area_css = app.CSS.split("ChatTextArea {", maxsplit=1)[1].split(
                 "}", maxsplit=1
@@ -769,8 +775,41 @@ def test_memory_tui_app_uses_neutral_agent_theme():
             message_css = app.CSS.split(".message {", maxsplit=1)[1]
             assert "#11171b" not in message_css
             assert "#131a1f" not in message_css
-            assert "border: round #2f3a42;" in app.CSS
-            assert "border-right: solid #334048;" in app.CSS
+            assert "#0d1114" not in app.CSS
+            assert "border: round #3a3d41;" in app.CSS
+            assert "border-right: solid #3a3d41;" in app.CSS
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_uses_scrollable_command_panel_for_memory():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        memory_items = [
+            (
+                "facts",
+                ("inspection", "operator", "facts"),
+                f"fact-{index}",
+                {"text": "x" * 60},
+            )
+            for index in range(30)
+        ]
+
+        async with app.run_test():
+            panel = app.query_one("#command_panel", VerticalScroll)
+            content = app.query_one("#command_panel_content", Static)
+            assert panel.has_class("hidden")
+            app._show_memory(memory_items)
+            assert not panel.has_class("hidden")
+            assert content.render() is not None
+            assert "max-height: 45vh;" in app.CSS
+            assert "overflow-y: auto;" in app.CSS
 
     asyncio.run(run_test())
 
@@ -778,7 +817,7 @@ def test_memory_tui_app_uses_neutral_agent_theme():
 def test_memory_tui_app_keeps_ctrl_c_for_input_clear_not_quit():
     bindings = {binding.key: binding.action for binding in MemoryTuiApp.BINDINGS}
 
-    assert bindings["ctrl+c"] == "quit"
+    assert "ctrl+c" not in bindings
     assert bindings["ctrl+q"] == "quit"
 
 
@@ -826,6 +865,188 @@ def test_memory_tui_app_ctrl_c_exits_when_input_is_empty():
             await pilot.press("ctrl+c")
             await pilot.pause()
             assert exited
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_ctrl_c_copies_selected_conversation_text():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        copied: list[str] = []
+        app.copy_to_clipboard = copied.append
+
+        async with app.run_test() as pilot:
+            text_area = app.query_one("#input", ChatTextArea)
+            app._write_user("selected conversation text")
+            message = app.query(".message.user").last()
+            text_area.load_text("draft message")
+            app.screen.selections = {message: SELECT_ALL}
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            assert copied == ["selected conversation text"]
+            assert app.screen.get_selected_text() is None
+            assert text_area.text == "draft message"
+            assert app.is_running
+            assert not app.query_one("#command_panel").has_class("hidden")
+            assert app._last_copy_panel_title == "Selection"
+            assert app._last_copy_panel_text == "selected conversation text"
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_copy_fallback_panel_and_selection_style():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        copied: list[str] = []
+        app.copy_to_clipboard = copied.append
+
+        async with app.run_test():
+            app._copy_text_with_fallback("manual copy text", title="Copy Test")
+            assert copied == ["manual copy text"]
+            assert "Terminal clipboard copy requested" in app._last_copy_panel_status
+            assert app._last_copy_panel_text == "manual copy text"
+            assert "Screen > .screen--selection" in app.CSS
+            assert "background: #0e639c;" in app.CSS
+            assert "ChatTextArea .text-area--selection" in app.CSS
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_copy_status_reports_tui_local_only():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test():
+            app._has_terminal_clipboard = lambda: False
+            app._supports_pyperclip = False
+            app._copy_text_with_fallback("local only text", title="Copy Test")
+            assert "TUI local clipboard only" in app._last_copy_panel_status
+            assert app._last_copy_panel_text == "local only text"
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_copy_status_reports_pyperclip_system_clipboard(monkeypatch):
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        pyperclip_calls = []
+        fake_pyperclip = SimpleNamespace(copy=pyperclip_calls.append)
+        monkeypatch.setitem(sys.modules, "pyperclip", fake_pyperclip)
+
+        async with app.run_test():
+            app._copy_text_with_fallback("system text", title="Copy Test")
+            assert pyperclip_calls == ["system text"]
+            assert "Copied to system clipboard via pyperclip" in (
+                app._last_copy_panel_status
+            )
+            assert app._last_copy_panel_text == "system text"
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_copy_status_falls_back_when_pyperclip_fails(monkeypatch):
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        def fail_copy(_text):
+            raise RuntimeError("clipboard unavailable")
+
+        monkeypatch.setitem(sys.modules, "pyperclip", SimpleNamespace(copy=fail_copy))
+
+        async with app.run_test():
+            app._copy_text_with_fallback("fallback text", title="Copy Test")
+            assert "Terminal clipboard copy requested" in app._last_copy_panel_status
+            assert app._last_copy_panel_text == "fallback text"
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_input_history_uses_up_down_keys():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            text_area = app.query_one("#input", ChatTextArea)
+            await pilot.press("f", "i", "r", "s", "t", "enter")
+            await pilot.pause()
+            await pilot.press("s", "e", "c", "o", "n", "d", "enter")
+            await pilot.pause()
+
+            text_area.load_text("draft")
+            await pilot.press("up")
+            await pilot.pause()
+            assert text_area.text == "second"
+            await pilot.press("up")
+            await pilot.pause()
+            assert text_area.text == "first"
+            await pilot.press("down")
+            await pilot.pause()
+            assert text_area.text == "second"
+            await pilot.press("down")
+            await pilot.pause()
+            assert text_area.text == "draft"
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_ctrl_c_interrupts_running_turn():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeDelayedStreamingGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            await pilot.press("s", "t", "r", "e", "a", "m", "enter")
+            await _wait_for_transcript(app, "first streamed step")
+            await pilot.press("ctrl+c")
+            await _wait_for_transcript(app, "• Interrupted after")
+            await asyncio.sleep(0.5)
+            transcript = "\n".join(app._transcript)
+            assert "first streamed step" in transcript
+            assert "• Interrupted after" in transcript
+            assert "final streamed step" not in transcript
+            assert "• Worked for" not in transcript
+            assert app.is_running
 
     asyncio.run(run_test())
 
@@ -912,6 +1133,30 @@ def test_memory_tui_app_copy_transcript_copies_plain_text():
             assert copied
             assert "User\nhello" in copied[-1]
             assert "Assistant\nanswer" in copied[-1]
+            assert not app.query_one("#command_panel").has_class("hidden")
+            assert app._last_copy_panel_title == "Transcript"
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_copy_last_uses_copy_panel():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        copied: list[str] = []
+        app.copy_to_clipboard = copied.append
+
+        async with app.run_test():
+            app._write_assistant("last assistant answer")
+            app._copy_last_assistant_message()
+            assert copied == ["last assistant answer"]
+            assert app._last_copy_panel_title == "Assistant"
+            assert app._last_copy_panel_text == "last assistant answer"
 
     asyncio.run(run_test())
 
