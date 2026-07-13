@@ -12,9 +12,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+
 from langgraph.store.memory import InMemoryStore
 from pydantic import ValidationError
 from rai.tools.memory import create_memory_tools
+
+
+class _Item:
+    def __init__(self, key, value):
+        self.key = key
+        self.value = value
+
+
+class _AsyncOnlyStore:
+    def __init__(self):
+        self.values = {}
+        self._loop = None
+
+    def put(self, *args, **kwargs):
+        raise RuntimeError("Synchronous calls to async store detected")
+
+    def search(self, *args, **kwargs):
+        raise RuntimeError("Synchronous calls to async store detected")
+
+    def delete(self, *args, **kwargs):
+        raise RuntimeError("Synchronous calls to async store detected")
+
+    async def aput(self, namespace, key, value):
+        self.values[(namespace, key)] = value
+
+    async def asearch(self, namespace, query=None, limit=10):
+        items = [
+            _Item(key, value)
+            for (ns, key), value in self.values.items()
+            if ns == namespace and (not query or query.lower() in str(value).lower())
+        ]
+        return items[:limit]
+
+    async def adelete(self, namespace, key):
+        self.values.pop((namespace, key), None)
 
 
 def test_forget_memory_deletes_matching_memories():
@@ -103,3 +140,33 @@ def test_save_location_rejects_objects_json_object():
         pass
     else:
         raise AssertionError("Expected objects JSON object to fail validation")
+
+
+def test_memory_tools_use_async_store_methods_in_arun():
+    async def run_test():
+        store = _AsyncOnlyStore()
+        tools = create_memory_tools(store=store, namespace="test", user_id="alice")
+
+        fact_result = await tools["save_fact"].ainvoke(
+            {"fact": "The user prefers inspection reports in Chinese."}
+        )
+        assert "Fact saved" in fact_result
+
+        location_result = await tools["save_location"].ainvoke(
+            {
+                "location_name": "Tunnel Entrance",
+                "pose": {"x": 1.0, "y": 2.0, "z": 0.0, "yaw": 0.25},
+            }
+        )
+        assert "Tunnel Entrance" in location_result
+        assert "yaw=0.2500" in location_result
+
+        recall_result = await tools["recall"].ainvoke(
+            {"query": "Tunnel", "memory_type": "spatial"}
+        )
+        assert "Tunnel Entrance" in recall_result
+
+        delete_result = await tools["forget"].ainvoke({"query": "Chinese"})
+        assert "Deleted 1 memories" in delete_result
+
+    asyncio.run(run_test())

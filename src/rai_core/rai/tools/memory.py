@@ -23,8 +23,9 @@ Provides 4 tools:
 
 import json
 import uuid
+import asyncio
 from datetime import datetime, timezone
-from typing import Optional, Type
+from typing import Any, Optional, Type
 
 from langchain_core.tools import BaseTool
 from langgraph.store.base import BaseStore
@@ -166,6 +167,38 @@ def create_memory_tools(
     fact_ns = (namespace, user_id, "facts")
     spatial_ns = (namespace, user_id, "spatial")
 
+    async def _await_store_coro(coro):
+        store_loop = getattr(store, "_loop", None)
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if (
+            store_loop is not None
+            and store_loop is not current_loop
+            and store_loop.is_running()
+        ):
+            future = asyncio.run_coroutine_threadsafe(coro, store_loop)
+            return await asyncio.wrap_future(future)
+        return await coro
+
+    async def _aput(ns: tuple[str, ...], key: str, value: dict) -> None:
+        if hasattr(store, "aput"):
+            await _await_store_coro(store.aput(ns, key, value))
+            return
+        store.put(ns, key, value)
+
+    async def _asearch(ns: tuple[str, ...], query: str, limit: int) -> list[Any]:
+        if hasattr(store, "asearch"):
+            return await _await_store_coro(store.asearch(ns, query=query, limit=limit))
+        return store.search(ns, query=query, limit=limit)
+
+    async def _adelete(ns: tuple[str, ...], key: str) -> None:
+        if hasattr(store, "adelete"):
+            await _await_store_coro(store.adelete(ns, key))
+            return
+        store.delete(ns, key)
+
     class SaveFactTool(BaseTool):
         """Save a text fact to long-term memory.
 
@@ -190,8 +223,14 @@ def create_memory_tools(
             store.put(fact_ns, key, value)
             return f"Fact saved: '{fact}'"
 
-        def _arun(self, fact: str) -> str:
-            return self._run(fact)
+        async def _arun(self, fact: str) -> str:
+            key = str(uuid.uuid4())
+            value = {
+                "text": fact,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            await _aput(fact_ns, key, value)
+            return f"Fact saved: '{fact}'"
 
     class SaveLocationTool(BaseTool):
         """Save structured spatial/location data to long-term memory.
@@ -236,14 +275,33 @@ def create_memory_tools(
                 result += f" at ({coords})"
             return result
 
-        def _arun(
+        async def _arun(
             self,
             location_name: str,
             pose: Optional[SaveLocationToolInput.PoseInput | dict | str] = None,
             objects: Optional[list[str] | str] = None,
             description: Optional[str] = None,
         ) -> str:
-            return self._run(location_name, pose, objects, description)
+            key = f"loc_{location_name.lower().replace(' ', '_')}"
+            pose_data = _normalize_pose(pose)
+            value = {
+                "location": location_name,
+                "pose": pose_data,
+                "objects": objects or [],
+                "description": description or "",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            await _aput(spatial_ns, key, value)
+            result = f"Location saved: '{location_name}'"
+            if pose_data:
+                coords = (
+                    f"{pose_data.get('x', '?')}, {pose_data.get('y', '?')}, "
+                    f"{pose_data.get('z', '?')}"
+                )
+                if pose_data.get("yaw") is not None:
+                    coords += f", yaw={pose_data.get('yaw'):.4f}"
+                result += f" at ({coords})"
+            return result
 
     class RecallMemoryTool(BaseTool):
         """Search and recall stored memories.
@@ -287,13 +345,32 @@ def create_memory_tools(
                 return f"No memories found matching '{query}'"
             return f"Found {len(results)} memories:\n" + "\n".join(results[:limit])
 
-        def _arun(
+        async def _arun(
             self,
             query: str,
             memory_type: Optional[str] = None,
             limit: int = 10,
         ) -> str:
-            return self._run(query, memory_type, limit)
+            namespaces = []
+            if memory_type is None or memory_type == "facts":
+                namespaces.append(("facts", fact_ns))
+            if memory_type is None or memory_type == "spatial":
+                namespaces.append(("spatial", spatial_ns))
+
+            results = []
+            for mtype, ns in namespaces:
+                try:
+                    items = await _asearch(ns, query=query, limit=limit)
+                    for item in items:
+                        results.append(
+                            f"[{mtype}] {item.key}: {json.dumps(item.value)}"
+                        )
+                except Exception as e:
+                    results.append(f"[{mtype}] Search error: {e}")
+
+            if not results:
+                return f"No memories found matching '{query}'"
+            return f"Found {len(results)} memories:\n" + "\n".join(results[:limit])
 
     class ForgetMemoryTool(BaseTool):
         """Delete matching stored memories."""
@@ -330,8 +407,29 @@ def create_memory_tools(
 
             return f"Deleted {len(deleted)} memories: {', '.join(deleted)}"
 
-        def _arun(self, query: str) -> str:
-            return self._run(query)
+        async def _arun(self, query: str) -> str:
+            namespaces = [("facts", fact_ns), ("spatial", spatial_ns)]
+            matches = []
+            for mtype, ns in namespaces:
+                try:
+                    items = await _asearch(ns, query=query, limit=10)
+                    for item in items:
+                        matches.append((mtype, ns, item.key, item.value))
+                except Exception:
+                    pass
+
+            if not matches:
+                return f"No memories found matching '{query}'"
+
+            deleted = []
+            for mtype, ns, key, _ in matches:
+                try:
+                    await _adelete(ns, key)
+                    deleted.append(f"[{mtype}] {key}")
+                except Exception as e:
+                    deleted.append(f"[{mtype}] {key}: error ({e})")
+
+            return f"Deleted {len(deleted)} memories: {', '.join(deleted)}"
 
     return {
         "save_fact": SaveFactTool(),
