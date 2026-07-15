@@ -1264,6 +1264,28 @@ def test_memory_tui_app_renders_final_tool_messages_without_running_state():
     asyncio.run(run_test())
 
 
+def test_memory_tui_app_labels_visual_tool_result_as_summary():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test():
+            app._write_tool_result(
+                "analyze_artifact_image",
+                "Detailed visual inspection report.",
+            )
+            transcript = "\n".join(app._transcript)
+            assert "• Vision result summary analyze_artifact_image" in transcript
+            assert "Detailed visual inspection report." in transcript
+
+    asyncio.run(run_test())
+
+
 def test_memory_tui_app_renders_realtime_tool_events_as_running_then_ran():
     async def run_test():
         session = MemoryCliSession(

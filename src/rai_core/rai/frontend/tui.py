@@ -18,6 +18,7 @@ from textual.theme import Theme
 from textual.widgets import Header, Markdown, Static, TextArea
 from textual.worker import WorkerState, get_current_worker
 
+from rai.frontend.clipboard import copy_text_to_clipboard
 from rai.frontend.cli import (
     CliAgentEvent,
     CliCommandResult,
@@ -25,6 +26,16 @@ from rai.frontend.cli import (
     MemoryCliSession,
     _format_json,
     parse_cli_input,
+)
+from rai.frontend.tui_adapter import TuiEventAdapter
+from rai.frontend.tui_widgets import (
+    ActivityMessage,
+    AssistantMessage,
+    SystemMessage,
+    ToolCallMessage,
+    ToolResultMessage,
+    UserMessage,
+    tool_result_action,
 )
 from rai.memory.long_term import format_long_term_item
 from rai.memory.session import SessionSummary
@@ -283,10 +294,10 @@ class MemoryTuiApp(App):
         self._last_activity_status = ""
         self._turn_started_at: float | None = None
         self._turn_timer: Any | None = None
-        self._working_widget: Static | None = None
+        self._working_widget: ActivityMessage | None = None
         self._working_transcript_index: int | None = None
-        self._tool_activity_widgets: dict[str, tuple[Static, str]] = {}
-        self._realtime_tool_result_ids: set[str] = set()
+        self._tool_activity_widgets: dict[str, tuple[ToolCallMessage, str]] = {}
+        self._event_adapter = TuiEventAdapter(self)
         self._agent_worker: Any | None = None
         self._turn_sequence = 0
         self._active_turn_id: int | None = None
@@ -298,7 +309,6 @@ class MemoryTuiApp(App):
         self._last_copy_panel_title = ""
         self._last_copy_panel_status = ""
         self._last_copy_panel_text = ""
-        self._supports_pyperclip: bool | None = None
         self._last_copy_system_target = ""
         self._transcript: list[str] = []
         self.log_path = Path(log_path).expanduser() if log_path is not None else None
@@ -388,27 +398,6 @@ class MemoryTuiApp(App):
             return
         self._copy_text_with_fallback(transcript, title="Transcript")
 
-    def copy_to_clipboard(self, text: str) -> None:
-        self._last_copy_system_target = ""
-        if self._supports_pyperclip is None:
-            try:
-                import pyperclip  # noqa: F401
-            except ImportError:
-                self._supports_pyperclip = False
-            else:
-                self._supports_pyperclip = True
-
-        if self._supports_pyperclip:
-            try:
-                import pyperclip
-
-                pyperclip.copy(text)
-            except Exception:
-                pass
-            else:
-                self._last_copy_system_target = "pyperclip"
-        super().copy_to_clipboard(text)
-
     def _copy_selected_text(self) -> bool:
         selected_text = self.screen.get_selected_text()
         if selected_text is None:
@@ -418,17 +407,22 @@ class MemoryTuiApp(App):
         return True
 
     def _copy_text_with_fallback(self, text: str, *, title: str = "Copy") -> None:
-        local_clipboard = False
         osc52_requested = False
-        try:
-            osc52_requested = self._has_terminal_clipboard()
-            self.copy_to_clipboard(text)
-            local_clipboard = True
-        except Exception:
-            pass
-        if self._last_copy_system_target:
+        use_pyperclip = (
+            getattr(self, "_supports_pyperclip", None) is not False
+            and "copy_to_clipboard" not in self.__dict__
+        )
+        osc52_requested = self._has_terminal_clipboard()
+        result = copy_text_to_clipboard(
+            self,
+            text,
+            use_pyperclip=use_pyperclip,
+            use_osc52=osc52_requested,
+        )
+        self._last_copy_system_target = result.method if result.method == "pyperclip" else ""
+        if result.method == "pyperclip":
             status = (
-                f"Copied to system clipboard via {self._last_copy_system_target}. "
+                "Copied to system clipboard via pyperclip. "
                 "If paste fails, copy from the text below."
             )
         elif osc52_requested:
@@ -436,7 +430,7 @@ class MemoryTuiApp(App):
                 "Terminal clipboard copy requested. If external paste fails, your "
                 "terminal or SSH session likely blocks OSC52; copy from the text below."
             )
-        elif local_clipboard:
+        elif result.success:
             status = (
                 "Copied to TUI local clipboard only. External apps cannot paste this; "
                 "copy from the text below."
@@ -550,16 +544,8 @@ class MemoryTuiApp(App):
     def _handle_agent_event(self, turn_id: int, event: CliAgentEvent) -> None:
         if self._is_turn_canceled(turn_id) or turn_id != self._active_turn_id:
             return
-        if event.kind == "status":
-            self._handle_status_event(event)
-            self._refresh_status(self._agent_status_label(event.status))
-            return
-        if event.kind == "message" and event.message is not None:
-            self._write_messages([event.message])
-            return
-        if event.kind == "done":
+        if self._event_adapter.handle_event(event):
             self._finish_turn_timeline(True)
-            return
 
     def _remember_input(self, value: str) -> None:
         if not self._input_history or self._input_history[-1] != value:
@@ -615,24 +601,7 @@ class MemoryTuiApp(App):
         self._finish_turn_interrupted(turn_id)
 
     def _write_messages(self, messages: Iterable[Any]) -> None:
-        for message in messages:
-            if isinstance(message, AIMessage):
-                if message.content:
-                    self._write_assistant(str(message.content))
-                for tool_call in message.tool_calls or []:
-                    name = tool_call.get("name", "tool")
-                    self._refresh_status(f"tool: {name}")
-                    self._write_tool_call(name, tool_call.get("args", {}))
-            elif isinstance(message, ToolMessage):
-                self._refresh_status(f"tool result: {message.name or 'tool'}")
-                if self._is_realtime_tool_result(message):
-                    self._append_log(
-                        "tool result", f"{message.name or 'tool'}\n{message.content}"
-                    )
-                    continue
-                self._write_tool_result(message.name or "tool", message.content)
-            elif isinstance(message, HumanMessage):
-                self._write_user(str(message.content))
+        self._event_adapter.write_messages(messages)
 
     def _show_help(self) -> None:
         self._show_notice(
@@ -845,14 +814,32 @@ class MemoryTuiApp(App):
         self._append_message("system", f"System\n{message}")
         self._append_log("system", message)
 
+    def refresh_status(self, status: str | None = None) -> None:
+        self._refresh_status(status)
+
+    def agent_status_label(self, status: str) -> str:
+        return self._agent_status_label(status)
+
+    def append_log(self, role: str, content: str) -> None:
+        self._append_log(role, content)
+
+    def write_user(self, message: str) -> None:
+        self._write_user(message)
+
     def _write_user(self, message: str) -> None:
         self._append_message("user", f"User\n{message}")
         self._append_log("user", message)
+
+    def write_assistant(self, message: str) -> None:
+        self._write_assistant(message)
 
     def _write_assistant(self, message: str) -> None:
         self._last_assistant_text = message
         self._append_message("assistant", f"Assistant\n{message}")
         self._append_log("assistant", message)
+
+    def write_tool_call(self, name: str, args: Any) -> None:
+        self._write_tool_call(name, args)
 
     def _write_tool_call(self, name: str, args: Any) -> None:
         args_summary = self._summarize_value(args)
@@ -864,13 +851,17 @@ class MemoryTuiApp(App):
         )
         self._append_log("tool call", f"{name}\n{_format_json(args)}")
 
+    def write_tool_result(self, name: str, content: Any) -> None:
+        self._write_tool_result(name, content)
+
     def _write_tool_result(self, name: str, content: Any) -> None:
         result_summary = self._summarize_value(content)
-        text = f"• Tool result {name}"
+        action = tool_result_action(name)
+        text = f"• {action} {name}"
         if result_summary:
             text = f"{text}\n  └ {result_summary}"
         self._append_message(
-            "tool", text, self._timeline_text("Tool result", name, result_summary)
+            "tool", text, self._timeline_text(action, name, result_summary)
         )
         self._append_log("tool result", f"{name}\n{content}")
 
@@ -915,15 +906,46 @@ class MemoryTuiApp(App):
         self, role: str, text: str, renderable: Any | None = None
     ) -> Static | Markdown:
         if renderable is not None:
+            if role == "activity":
+                return ActivityMessage(renderable)
+            if role == "tool":
+                title, _, body = text.partition("\n")
+                action_name = title.removeprefix("• ").strip()
+                action, _, name = action_name.partition(" ")
+                return ToolResultMessage(
+                    name or action,
+                    body.removeprefix("  └ ").strip(),
+                    renderable,
+                )
             return Static(renderable, classes=f"message {role}")
-        widget: Static | Markdown
         title, _, body = text.partition("\n")
         if role == "assistant":
-            widget = Markdown(body or text, classes=f"message {role}")
+            widget = AssistantMessage(body or text)
             widget.border_title = f" {title} " if body else ""
         elif role == "user":
-            widget = Static(body or text, classes=f"message {role}")
+            widget = UserMessage(body or text)
             widget.border_title = f" {title} " if body else ""
+        elif role == "tool":
+            detail = body.removeprefix("  └ ").strip()
+            if title.startswith("Tool call:"):
+                widget = ToolCallMessage(
+                    title.removeprefix("Tool call:").strip(), detail
+                )
+            elif title.startswith("Tool result:"):
+                widget = ToolResultMessage(
+                    title.removeprefix("Tool result:").strip(), detail
+                )
+            else:
+                first_line = title.removeprefix("• ").strip()
+                action, _, name = first_line.partition(" ")
+                if action == "Tool":
+                    widget = ToolCallMessage(name.removeprefix("call "), detail)
+                else:
+                    widget = ToolResultMessage(name, detail)
+        elif role == "system":
+            widget = SystemMessage(text)
+        elif role == "activity":
+            widget = ActivityMessage(text)
         else:
             widget = Static(text, classes=f"message {role}")
         return widget
@@ -976,7 +998,7 @@ class MemoryTuiApp(App):
         self._turn_started_at = monotonic()
         self._stop_turn_timer()
         self._tool_activity_widgets.clear()
-        self._realtime_tool_result_ids.clear()
+        self._event_adapter.reset_turn()
         text = "• Working (0s)"
         self._working_transcript_index = len(self._transcript)
         self._working_widget = self._append_message(
@@ -1064,42 +1086,33 @@ class MemoryTuiApp(App):
             return "Working"
         return status
 
-    def _handle_status_event(self, event: CliAgentEvent) -> None:
-        status = event.status
-        if not status.startswith("tool: "):
-            return
-        tool_name = status.removeprefix("tool: ").rsplit(" ", maxsplit=1)[0]
-        event_data = event.data if isinstance(event.data, dict) else {}
-        tool_key = str(event_data.get("run_id") or tool_name)
-        payload = (
-            event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
-        )
-        if status.endswith("starting"):
-            self._start_tool_activity(tool_key, tool_name, payload.get("input"))
-        elif status.endswith("done"):
-            self._finish_tool_activity(tool_key, tool_name, payload.get("output"), True)
-        elif status.endswith("error"):
-            self._finish_tool_activity(tool_key, tool_name, payload.get("error"), False)
+    def start_tool_activity(self, tool_key: str, name: str, args: Any) -> None:
+        self._start_tool_activity(tool_key, name, args)
 
     def _start_tool_activity(self, tool_key: str, name: str, args: Any) -> None:
         summary = self._summarize_value(args)
         text = f"• Running {name}"
         if summary:
             text = f"{text}\n  └ {summary}"
-        widget = self._append_message(
-            "activity", text, self._timeline_text("Running", name, summary)
-        )
-        if isinstance(widget, Static):
-            self._tool_activity_widgets[tool_key] = (widget, text)
-            self._tool_activity_widgets[name] = (widget, text)
+        renderable = self._timeline_text("Running", name, summary)
+        self._transcript.append(text)
+        widget = ToolCallMessage(name, summary, renderable)
+        self._conversation().mount(widget)
+        self._move_working_activity_to_end(after=widget)
+        self._scroll_conversation_end()
+        self._tool_activity_widgets[tool_key] = (widget, text)
+        self._tool_activity_widgets[name] = (widget, text)
         self._append_log("activity", text)
+
+    def finish_tool_activity(
+        self, tool_key: str, name: str, result: Any, succeeded: bool
+    ) -> None:
+        self._finish_tool_activity(tool_key, name, result, succeeded)
 
     def _finish_tool_activity(
         self, tool_key: str, name: str, result: Any, succeeded: bool
     ) -> None:
         summary = self._summarize_value(result)
-        if isinstance(result, ToolMessage) and result.tool_call_id:
-            self._realtime_tool_result_ids.add(str(result.tool_call_id))
         action = "Ran" if succeeded else "Tool failed"
         style = "#86c39a" if succeeded else "#d06f6f"
         text = f"• {action} {name}"
@@ -1110,16 +1123,18 @@ class MemoryTuiApp(App):
             tool_key, self._tool_activity_widgets.pop(name, None)
         )
         if existing is None:
-            self._append_message("activity", text, renderable)
+            self._append_message("tool", text, renderable)
         else:
             widget, old_text = existing
             self._tool_activity_widgets.pop(tool_key, None)
             self._tool_activity_widgets.pop(name, None)
-            widget.update(renderable)
+            widget.set_result(action, name, summary, renderable)
             if old_text in self._transcript:
                 self._transcript[self._transcript.index(old_text)] = text
             else:
                 self._transcript.append(text)
+            self._move_working_activity_to_end(after=widget)
+            self._scroll_conversation_end()
         self._append_log("activity", text)
 
     def _update_working_activity(self, text: str, renderable: Text) -> None:
@@ -1184,12 +1199,6 @@ class MemoryTuiApp(App):
         if len(summary) > limit:
             return f"{summary[: limit - 1]}…"
         return summary
-
-    def _is_realtime_tool_result(self, message: ToolMessage) -> bool:
-        return bool(
-            message.tool_call_id
-            and str(message.tool_call_id) in self._realtime_tool_result_ids
-        )
 
     def _as_markdown_message(self, text: str) -> str:
         title, _, body = text.partition("\n")
