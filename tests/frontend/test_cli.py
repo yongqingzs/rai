@@ -19,6 +19,7 @@ from rai.frontend.cli import (
     shutdown_tool_connectors,
 )
 from rai.frontend.tui import RAI_AGENT_THEME, ChatTextArea, MemoryTuiApp
+from rai.frontend.tui_widgets import AssistantMessage, ToolResultMessage
 from rai.memory.agent_factory import create_memory_agent_with_tools
 from rai.memory.config import MemoryConfig
 from rai.memory.manager import MemoryManager
@@ -739,7 +740,8 @@ def test_memory_tui_app_has_inline_activity_layout():
             assert isinstance(conversation, VerticalScroll)
             assert not isinstance(conversation, RichLog)
             child_ids = [getattr(child, "id", None) for child in app.screen.children]
-            assert child_ids.index("input") < child_ids.index("agent_status")
+            assert child_ids.index("input_shell") < child_ids.index("agent_status")
+            assert app.query_one("#input", ChatTextArea)
 
     asyncio.run(run_test())
 
@@ -756,15 +758,11 @@ def test_memory_tui_app_uses_neutral_agent_theme():
 
         async with app.run_test():
             assert app.theme == RAI_AGENT_THEME.name
-            assert RAI_AGENT_THEME.background == "#1e1e1e"
-            assert "ChatTextArea {\n        height: auto;" in app.CSS
-            assert (
-                "ChatTextArea {\n        height: auto;\n        min-height: 1;\n        max-height: 6;\n        border: tall #34424b;"
-                not in app.CSS
-            )
-            assert "border: tall #3a3d41;" in app.CSS
-            assert "background: #1e1e1e;" in app.CSS
-            assert "background: #252526;" in app.CSS
+            assert RAI_AGENT_THEME.background == "#151b23"
+            assert RAI_AGENT_THEME.background != "#000000"
+            assert "#input_shell {" in app.CSS
+            assert "border: tall $rai-border;" in app.CSS
+            assert "background: $background;" in app.CSS
             assert "ChatTextArea:focus" in app.CSS
             chat_text_area_css = app.CSS.split("ChatTextArea {", maxsplit=1)[1].split(
                 "}", maxsplit=1
@@ -772,12 +770,12 @@ def test_memory_tui_app_uses_neutral_agent_theme():
             assert "$accent" not in chat_text_area_css
             assert "$warning" not in chat_text_area_css
             assert "$error" not in chat_text_area_css
-            message_css = app.CSS.split(".message {", maxsplit=1)[1]
-            assert "#11171b" not in message_css
-            assert "#131a1f" not in message_css
-            assert "#0d1114" not in app.CSS
-            assert "border: round #3a3d41;" in app.CSS
-            assert "border-right: solid #3a3d41;" in app.CSS
+            message_css = app.CSS.split(".message {", maxsplit=1)[1].split(
+                "}", maxsplit=1
+            )[0]
+            assert "border-left: solid $rai-border;" in message_css
+            assert "border: round" not in message_css
+            assert "border-right" not in message_css
 
     asyncio.run(run_test())
 
@@ -884,7 +882,8 @@ def test_memory_tui_app_ctrl_c_copies_selected_conversation_text():
         async with app.run_test() as pilot:
             text_area = app.query_one("#input", ChatTextArea)
             app._write_user("selected conversation text")
-            message = app.query(".message.user").last()
+            await pilot.pause()
+            message = app.query(".message.user .message-body").last()
             text_area.load_text("draft message")
             app.screen.selections = {message: SELECT_ALL}
             await pilot.press("ctrl+c")
@@ -918,7 +917,7 @@ def test_memory_tui_app_copy_fallback_panel_and_selection_style():
             assert "Terminal clipboard copy requested" in app._last_copy_panel_status
             assert app._last_copy_panel_text == "manual copy text"
             assert "Screen > .screen--selection" in app.CSS
-            assert "background: #0e639c;" in app.CSS
+            assert "background: $input-selection-background;" in app.CSS
             assert "ChatTextArea .text-area--selection" in app.CSS
 
     asyncio.run(run_test())
@@ -1061,11 +1060,16 @@ def test_memory_tui_app_renders_assistant_as_markdown_message():
         )
         app = MemoryTuiApp(session, log_path=None)
 
-        async with app.run_test():
+        async with app.run_test() as pilot:
             app._write_assistant("answer")
+            await pilot.pause()
             assistant_message = app.query(".message.assistant").last()
-            assert isinstance(assistant_message, Markdown)
-            assert assistant_message.border_title == " Assistant "
+            assert isinstance(assistant_message, AssistantMessage)
+            assert isinstance(assistant_message.query_one(".message-body"), Markdown)
+            assert (
+                assistant_message.query_one(".message-header", Static).render().plain
+                == "Assistant"
+            )
             assert "Assistant\nanswer" in app._transcript
 
     asyncio.run(run_test())
@@ -1081,10 +1085,14 @@ def test_memory_tui_app_renders_user_role_title():
         )
         app = MemoryTuiApp(session, log_path=None)
 
-        async with app.run_test():
+        async with app.run_test() as pilot:
             app._write_user("hello")
+            await pilot.pause()
             user_message = app.query(".message.user").last()
-            assert user_message.border_title == " User "
+            assert (
+                user_message.query_one(".message-header", Static).render().plain
+                == "User"
+            )
             assert "User\nhello" in app._transcript
 
     asyncio.run(run_test())
@@ -1110,6 +1118,137 @@ def test_memory_tui_app_accepts_multiline_paste_and_submits_full_text():
             assert graph.calls[0]["input"]["messages"][0].content == (
                 "first line\nsecond line"
             )
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_collapses_large_paste_but_submits_full_text():
+    async def run_test():
+        graph = _FakeGraph()
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=graph,
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        pasted = "line one\nline two\nline three\nline four"
+
+        async with app.run_test() as pilot:
+            text_area = app.query_one("#input", ChatTextArea)
+            await text_area._on_paste(events.Paste(pasted))
+            assert text_area.text == "[Pasted text #1 +4 lines]"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert graph.calls[0]["input"]["messages"][0].content == pasted
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_completes_slash_commands_and_shows_argument_hint():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            text_area = app.query_one("#input", ChatTextArea)
+            await pilot.press("/", "r", "e", "s")
+            await pilot.pause()
+            assert app._has_command_completion()
+            assert app._accept_command_completion()
+            await pilot.pause()
+            assert text_area.text == "/resume "
+            assert app._command_panel_mode == "hint"
+            panel_text = app.query_one("#command_panel_content", Static).render()
+            assert "[thread_id] [--quiet]" in panel_text.plain
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_timestamps_are_hidden_then_toggled_for_all_messages():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test() as pilot:
+            app._write_user("hello")
+            await pilot.pause()
+            header = app.query(".message.user .message-header").last()
+            assert header.render().plain == "User"
+            app._toggle_timestamps()
+            assert header.render().plain.startswith("User  ")
+            assert header.render().plain.count(":") == 2
+            app._toggle_timestamps()
+            assert header.render().plain == "User"
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_lazily_expands_long_assistant_message():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        content = "\n".join(f"inspection line {index}" for index in range(80))
+
+        async with app.run_test() as pilot:
+            app._write_assistant(content)
+            await pilot.pause()
+            message = app.query(".message.assistant").last()
+            body = message.query_one(".message-body", Markdown)
+            assert "inspection line 79" not in body._markdown
+            message.action_toggle_details()
+            assert "inspection line 79" in body._markdown
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_tool_results_are_domain_aware_and_lazy():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+        cases = (
+            ("analyze_artifact_image", "vision", "Vision analysis"),
+            ("query_robot_docs", "rag", "Knowledge retrieval"),
+            ("navigate_to_pose_blocking", "navigation", "Navigation"),
+            ("call_ros_service", "ros", "ROS operation"),
+        )
+
+        async with app.run_test() as pilot:
+            for name, domain, action in cases:
+                app._write_tool_result(name, {"status": "success", "detail": "x" * 500})
+                await pilot.pause()
+                message = app.query(".message.tool").last()
+                assert isinstance(message, ToolResultMessage)
+                assert message.has_class(domain)
+                assert (
+                    action in message.query_one(".tool-header", Static).render().plain
+                )
+                detail = message.query_one(".tool-detail", Static)
+                assert detail.has_class("hidden")
+                assert detail.render().plain == ""
+                message.action_toggle_details()
+                assert not detail.has_class("hidden")
+                assert "x" * 100 in detail.render().plain
 
     asyncio.run(run_test())
 
@@ -1222,14 +1361,14 @@ def test_memory_tui_app_updates_working_timeline_in_place():
         async with app.run_test():
             app._start_turn_timeline()
             assert "• Working (0s)" in app._transcript
-            assert "Working" not in app._status_text()
+            assert app._status_text() == "Working · Ctrl+C to interrupt"
             app._write_assistant("answer while working")
             assert app._transcript[-1] == "• Working (0s)"
             app._turn_started_at = app._turn_started_at - 65
             app._refresh_working_status()
             assert app._transcript[-1] == "• Working (1m 05s)"
             assert "• Working (0s)" not in app._transcript
-            assert "Working" not in app._status_text()
+            assert app._status_text() == "Working · Ctrl+C to interrupt"
             app._finish_turn_timeline(True)
             assert app._transcript[-1] == "• Worked for 1m 05s"
             assert all("• Working" not in item for item in app._transcript)
@@ -1280,7 +1419,8 @@ def test_memory_tui_app_labels_visual_tool_result_as_summary():
                 "Detailed visual inspection report.",
             )
             transcript = "\n".join(app._transcript)
-            assert "• Vision result summary analyze_artifact_image" in transcript
+            assert "• Vision analysis analyze_artifact_image" in transcript
+            assert "Analysis complete" in transcript
             assert "Detailed visual inspection report." in transcript
 
     asyncio.run(run_test())

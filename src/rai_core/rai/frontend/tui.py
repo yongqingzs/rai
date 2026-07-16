@@ -9,13 +9,13 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from textual import events, work
+from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
-from textual.message import Message
+from textual.containers import Horizontal, VerticalScroll
 from textual.theme import Theme
-from textual.widgets import Header, Markdown, Static, TextArea
+from textual.widget import Widget
+from textual.widgets import Header, Static
 from textual.worker import WorkerState, get_current_worker
 
 from rai.frontend.clipboard import copy_text_to_clipboard
@@ -28,6 +28,12 @@ from rai.frontend.cli import (
     parse_cli_input,
 )
 from rai.frontend.tui_adapter import TuiEventAdapter
+from rai.frontend.tui_input import (
+    ChatTextArea,
+    CommandSpec,
+    command_hint,
+    matching_commands,
+)
 from rai.frontend.tui_widgets import (
     ActivityMessage,
     AssistantMessage,
@@ -35,103 +41,63 @@ from rai.frontend.tui_widgets import (
     ToolCallMessage,
     ToolResultMessage,
     UserMessage,
-    tool_result_action,
+    present_tool_result,
 )
 from rai.memory.long_term import format_long_term_item
 from rai.memory.session import SessionSummary
 
+TUI_COLORS = {
+    "background": "#151b23",
+    "surface": "#1b222c",
+    "panel": "#202936",
+    "border": "#334155",
+    "border_focus": "#5f7896",
+    "text": "#d8dee9",
+    "muted": "#8290a3",
+    "primary": "#82aaff",
+    "assistant": "#72c7b7",
+    "tool": "#d6ad68",
+    "success": "#8fbc8f",
+    "warning": "#d7b46a",
+    "error": "#d77a7a",
+    "selection": "#315a78",
+}
+
 RAI_AGENT_THEME = Theme(
     name="rai_agent_dark",
-    primary="#8fb3c8",
-    secondary="#6f8796",
-    accent="#7bb7a7",
-    foreground="#d7dde2",
-    background="#1e1e1e",
-    surface="#252526",
-    panel="#2d2d30",
-    boost="#333337",
-    success="#86c39a",
-    warning="#d7b46a",
-    error="#d06f6f",
+    primary=TUI_COLORS["primary"],
+    secondary=TUI_COLORS["muted"],
+    accent=TUI_COLORS["assistant"],
+    foreground=TUI_COLORS["text"],
+    background=TUI_COLORS["background"],
+    surface=TUI_COLORS["surface"],
+    panel=TUI_COLORS["panel"],
+    boost="#273241",
+    success=TUI_COLORS["success"],
+    warning=TUI_COLORS["warning"],
+    error=TUI_COLORS["error"],
     dark=True,
     variables={
         "block-cursor-text-style": "none",
-        "input-cursor-background": "#c8d5dc",
-        "input-cursor-foreground": "#1e1e1e",
-        "input-selection-background": "#355263 70%",
-        "scrollbar": "#3a3d41",
-        "scrollbar-hover": "#4b4f54",
-        "scrollbar-active": "#60666c",
-        "scrollbar-background": "#252526",
+        "input-cursor-background": "#c7d3df",
+        "input-cursor-foreground": TUI_COLORS["background"],
+        "input-selection-background": f"{TUI_COLORS['selection']} 80%",
+        "scrollbar": TUI_COLORS["border"],
+        "scrollbar-hover": TUI_COLORS["border_focus"],
+        "scrollbar-active": TUI_COLORS["primary"],
+        "scrollbar-background": TUI_COLORS["surface"],
+        "rai-border": TUI_COLORS["border"],
+        "rai-border-focus": TUI_COLORS["border_focus"],
+        "rai-muted": TUI_COLORS["muted"],
+        "rai-user": TUI_COLORS["primary"],
+        "rai-assistant": TUI_COLORS["assistant"],
+        "rai-tool": TUI_COLORS["tool"],
+        "rai-vision": "#c099d8",
+        "rai-rag": "#85b7d9",
+        "rai-navigation": "#79c6a3",
+        "rai-ros": "#d6ad68",
     },
 )
-
-
-class ChatTextArea(TextArea):
-    """Multiline chat input: Enter submits, Shift/Alt+Enter inserts a newline."""
-
-    class Submitted(Message):
-        def __init__(self, text: str, text_area: "ChatTextArea") -> None:
-            super().__init__()
-            self.text = text
-            self.text_area = text_area
-
-    async def _on_key(self, event: events.Key) -> None:
-        if event.key == "ctrl+c":
-            event.stop()
-            event.prevent_default()
-            if self.app._copy_selected_text():
-                return
-            if self.app._is_agent_running():
-                self.app._cancel_agent_turn()
-                return
-            if self.text:
-                self.load_text("")
-            else:
-                self.app.exit()
-            return
-        if self.app._has_active_picker():
-            if event.key == "enter":
-                event.stop()
-                event.prevent_default()
-                self.app._confirm_picker_selection()
-                return
-            if event.key == "up":
-                event.stop()
-                event.prevent_default()
-                self.app._move_picker_selection(-1)
-                return
-            if event.key == "down":
-                event.stop()
-                event.prevent_default()
-                self.app._move_picker_selection(1)
-                return
-            if event.key == "escape":
-                event.stop()
-                event.prevent_default()
-                self.app._clear_command_panel()
-                return
-        if event.key == "up":
-            event.stop()
-            event.prevent_default()
-            self.app._recall_input_history(-1)
-            return
-        if event.key == "down":
-            event.stop()
-            event.prevent_default()
-            self.app._recall_input_history(1)
-            return
-        if event.key == "enter":
-            event.stop()
-            event.prevent_default()
-            self.post_message(self.Submitted(self.text, self))
-            return
-        if event.key in {"shift+enter", "alt+enter"}:
-            event.stop()
-            event.prevent_default()
-            self.insert("\n")
-            return
-        await super()._on_key(event)
 
 
 class MemoryTuiApp(App):
@@ -140,30 +106,31 @@ class MemoryTuiApp(App):
     CSS = """
     Screen {
         layout: vertical;
-        background: #1e1e1e;
-        color: #d7dde2;
+        background: $background;
+        color: $foreground;
     }
 
     Screen > .screen--selection {
-        background: #0e639c;
-        color: #ffffff;
+        background: $input-selection-background;
+        color: $foreground;
         text-style: bold;
     }
 
     #conversation {
         height: 1fr;
-        border: tall #3a3d41;
+        border: none;
         padding: 1 1;
-        background: #1e1e1e;
+        background: $background;
+        scrollbar-gutter: stable;
     }
 
     #command_panel {
         height: auto;
         max-height: 45vh;
         padding: 0 1;
-        border: round #4b4f54;
-        background: #252526;
-        color: #d7dde2;
+        border-left: solid $rai-border-focus;
+        background: $surface;
+        color: $foreground;
         overflow-y: auto;
         scrollbar-gutter: stable;
     }
@@ -172,99 +139,166 @@ class MemoryTuiApp(App):
         display: none;
     }
 
-    ChatTextArea {
+    #input_shell {
         height: auto;
         min-height: 1;
         max-height: 6;
-        border: tall #3a3d41;
-        background: #252526;
-        color: #dde4e8;
+        border: tall $rai-border;
+        background: $surface;
+    }
+
+    #input_shell:focus-within {
+        border: tall $rai-border-focus;
+        background: $panel;
+    }
+
+    #input_prompt {
+        width: 3;
+        height: 100%;
+        padding: 0 0 0 1;
+        color: $primary;
+        text-style: bold;
+        background: transparent;
+    }
+
+    ChatTextArea {
+        width: 1fr;
+        height: auto;
+        min-height: 1;
+        max-height: 6;
+        border: none;
+        padding: 0;
+        background: transparent;
+        color: $foreground;
     }
 
     ChatTextArea:focus {
-        border: tall #6f9eb4;
-        background: #2d2d30;
+        border: none;
+        background: transparent;
     }
 
     ChatTextArea .text-area--cursor {
-        background: #c8d5dc;
-        color: #1e1e1e;
+        background: $input-cursor-background;
+        color: $input-cursor-foreground;
         text-style: none;
     }
 
     ChatTextArea .text-area--selection {
-        background: #0e639c;
-        color: #ffffff;
+        background: $input-selection-background;
+        color: $foreground;
     }
 
     ChatTextArea .text-area--cursor-line {
-        background: #2d2d30;
+        background: transparent;
     }
 
     ChatTextArea .text-area--placeholder {
-        color: #70808a;
+        color: $rai-muted;
     }
 
     .message {
         width: 100%;
-        margin: 1 0 1 0;
-        padding: 1 2;
-        border: round #3a3d41;
-        background: #252526;
-        color: #d7dde2;
+        height: auto;
+        margin: 0 0 1 0;
+        padding: 0 1 0 2;
+        border-left: solid $rai-border;
+        background: $surface 55%;
+        color: $foreground;
     }
 
     .message.user {
-        color: #e6edf1;
-        border-left: solid #6f8796;
-        border-top: solid #3a3d41;
-        border-right: solid #3a3d41;
-        border-bottom: solid #3a3d41;
-        border-title-color: #9ed0ff;
-        background: #252526;
+        border-left: solid $rai-user;
+        background: $surface 35%;
     }
 
     .message.assistant {
-        color: #d7dde2;
-        border-left: solid #7bb7a7;
-        border-top: solid #3a3d41;
-        border-right: solid #3a3d41;
-        border-bottom: solid #3a3d41;
-        border-title-color: #8fe3c2;
-        background: #2d2d30;
+        border-left: solid $rai-assistant;
+        background: $panel 45%;
     }
 
     .message.system {
-        color: #8f9ba4;
-        border-left: solid #34424b;
-        border-top: solid #333337;
-        border-right: solid #333337;
-        border-bottom: solid #333337;
-        background: #252526;
+        color: $rai-muted;
+        border-left: solid $rai-border;
+        background: transparent;
     }
 
     .message.tool {
-        color: #c8b47e;
-        border-left: solid #6b6041;
-        border-top: solid #3b382a;
-        border-right: solid #3b382a;
-        border-bottom: solid #3b382a;
-        background: #2a2a25;
+        border-left: solid $rai-tool;
+        background: $surface 45%;
+    }
+
+    .message.tool.vision { border-left: solid $rai-vision; }
+    .message.tool.rag { border-left: solid $rai-rag; }
+    .message.tool.navigation { border-left: solid $rai-navigation; }
+    .message.tool.ros { border-left: solid $rai-ros; }
+
+    .message-header {
+        height: 1;
+        text-style: bold;
+        color: $rai-muted;
+    }
+
+    .user .message-header { color: $rai-user; }
+    .assistant .message-header { color: $rai-assistant; }
+
+    .message-body {
+        height: auto;
+        padding: 0;
+        background: transparent;
+        color: $foreground;
+    }
+
+    .message-hint, .tool-hint {
+        height: 1;
+        color: $rai-muted;
+    }
+
+    .message-hint:hover, .tool-hint:hover {
+        color: $primary;
+        text-style: underline;
+    }
+
+    .tool-header {
+        height: 1;
+        color: $rai-tool;
+    }
+
+    .vision .tool-header { color: $rai-vision; }
+    .rag .tool-header { color: $rai-rag; }
+    .navigation .tool-header { color: $rai-navigation; }
+    .ros .tool-header { color: $rai-ros; }
+
+    .tool-summary {
+        height: auto;
+        color: $foreground;
+        padding-left: 2;
+    }
+
+    .tool-detail {
+        height: auto;
+        margin-top: 1;
+        padding: 0 1;
+        color: $foreground;
+        background: $background 45%;
+    }
+
+    .hidden {
+        display: none;
     }
 
     .message.activity {
-        color: #7f8c95;
+        color: $rai-muted;
         margin: 0 0 1 0;
         padding: 0 1;
         border: none;
-        background: #1e1e1e;
+        background: transparent;
     }
 
     #agent_status {
         height: 1;
         padding: 0 1;
-        background: #1e1e1e;
-        color: #7f8c95;
+        background: $background;
+        color: $rai-muted;
     }
     """
 
@@ -282,6 +316,8 @@ class MemoryTuiApp(App):
         log_path: str | Path | None = None,
     ):
         super().__init__()
+        self.register_theme(RAI_AGENT_THEME)
+        self.theme = RAI_AGENT_THEME.name
         self.session = session
         self._status = "idle"
         self._picker_mode: str | None = None
@@ -290,6 +326,10 @@ class MemoryTuiApp(App):
         self._memory_picker: list[tuple[str, Any, str, Any]] = []
         self._memory_picker_index = 0
         self._memory_picker_kind = ""
+        self._command_matches: list[CommandSpec] = []
+        self._command_match_index = 0
+        self._command_panel_mode: str | None = None
+        self._timestamps_visible = False
         self._last_assistant_text = ""
         self._last_activity_status = ""
         self._turn_started_at: float | None = None
@@ -318,12 +358,16 @@ class MemoryTuiApp(App):
         yield VerticalScroll(id="conversation")
         with VerticalScroll(id="command_panel", classes="hidden"):
             yield Static("", id="command_panel_content")
-        yield ChatTextArea(id="input")
+        with Horizontal(id="input_shell"):
+            yield Static("›", id="input_prompt")
+            yield ChatTextArea(
+                id="input",
+                placeholder="Ask RAI or type / for commands",
+                highlight_cursor_line=False,
+            )
         yield Static(self._status_text(), id="agent_status")
 
     def on_mount(self) -> None:
-        self.register_theme(RAI_AGENT_THEME)
-        self.theme = RAI_AGENT_THEME.name
         self._write_conversation_system(
             "RAI TUI started. Use /help for commands, /resume to choose a session."
         )
@@ -348,7 +392,7 @@ class MemoryTuiApp(App):
 
     def on_chat_text_area_submitted(self, event: ChatTextArea.Submitted) -> None:
         value = event.text.strip()
-        event.text_area.load_text("")
+        event.text_area.clear_after_submit()
         if not value:
             return
         self._remember_input(value)
@@ -374,6 +418,9 @@ class MemoryTuiApp(App):
         if value == "/copy-transcript":
             self.action_copy_transcript()
             return
+        if value == "/timestamps":
+            self._toggle_timestamps()
+            return
         command = parse_cli_input(value)
         if command.should_exit:
             self.exit()
@@ -383,6 +430,10 @@ class MemoryTuiApp(App):
             return
         if command.turn is not None:
             self._submit_turn(command.turn)
+
+    def on_text_area_changed(self, event: ChatTextArea.Changed) -> None:
+        if self.is_running and event.text_area.id == "input":
+            self._refresh_command_assist(event.text_area.text)
 
     def action_clear_conversation(self) -> None:
         self._conversation().remove_children()
@@ -419,7 +470,9 @@ class MemoryTuiApp(App):
             use_pyperclip=use_pyperclip,
             use_osc52=osc52_requested,
         )
-        self._last_copy_system_target = result.method if result.method == "pyperclip" else ""
+        self._last_copy_system_target = (
+            result.method if result.method == "pyperclip" else ""
+        )
         if result.method == "pyperclip":
             status = (
                 "Copied to system clipboard via pyperclip. "
@@ -450,9 +503,9 @@ class MemoryTuiApp(App):
         self._last_copy_panel_text = text
         self._show_panel(
             Panel(
-                Text(f"{status}\n\n{text}", style="#d7dde2"),
+                Text(f"{status}\n\n{text}", style=TUI_COLORS["text"]),
                 title=title,
-                border_style="#7bb7a7",
+                border_style=TUI_COLORS["assistant"],
             )
         )
 
@@ -609,7 +662,8 @@ class MemoryTuiApp(App):
             "/resume <thread_id> [--quiet], /session, /users, /user <id>, "
             "/memory, /memory facts, /memory locations, /delete-session [thread_id], "
             "/delete-memory [facts|locations] [key], /delete-user <user_id>, "
-            "/clear, /export-session <path>, /copy-last, /copy-transcript, /log, /exit"
+            "/clear, /export-session <path>, /copy-last, /copy-transcript, /log, "
+            "/timestamps, /exit"
         )
 
     def _show_sessions(self) -> None:
@@ -644,6 +698,73 @@ class MemoryTuiApp(App):
             self._show_notice(f"No memory items{suffix}.")
             return
         self._render_memory_picker()
+
+    def _refresh_command_assist(self, value: str) -> None:
+        if self._has_active_picker():
+            return
+        matches = matching_commands(value)
+        exact = next((item for item in matches if item.command == value), None)
+        if exact is not None:
+            matches = []
+        if matches:
+            self._command_matches = matches[:8]
+            self._command_match_index = min(
+                self._command_match_index, len(self._command_matches) - 1
+            )
+            self._command_panel_mode = "completion"
+            self._render_command_completions()
+            return
+        self._command_matches = []
+        self._command_match_index = 0
+        hint = command_hint(value)
+        if hint is not None:
+            self._command_panel_mode = "hint"
+            self._show_panel(
+                Text.assemble(
+                    (hint.usage, f"bold {TUI_COLORS['primary']}"),
+                    (f"  {hint.description}", TUI_COLORS["muted"]),
+                )
+            )
+        elif self._command_panel_mode in {"completion", "hint"}:
+            self._clear_command_panel()
+
+    def _render_command_completions(self) -> None:
+        table = Table(show_header=False, box=None, padding=(0, 1))
+        table.add_column("", width=1)
+        table.add_column("Command")
+        table.add_column("Description", style=TUI_COLORS["muted"])
+        for index, spec in enumerate(self._command_matches):
+            table.add_row(
+                "›" if index == self._command_match_index else "",
+                spec.usage,
+                spec.description,
+                style=TUI_COLORS["primary"]
+                if index == self._command_match_index
+                else None,
+            )
+        self._show_panel(table)
+
+    def _has_command_completion(self) -> bool:
+        return bool(self._command_panel_mode == "completion" and self._command_matches)
+
+    def _move_command_completion(self, delta: int) -> None:
+        if not self._command_matches:
+            return
+        self._command_match_index = (self._command_match_index + delta) % len(
+            self._command_matches
+        )
+        self._render_command_completions()
+
+    def _accept_command_completion(self) -> bool:
+        if not self._command_matches:
+            return False
+        spec = self._command_matches[self._command_match_index]
+        value = f"{spec.command} " if spec.arguments else spec.command
+        self._command_matches = []
+        self._command_match_index = 0
+        self._load_input_text(value)
+        self._refresh_command_assist(value)
+        return True
 
     def _has_active_picker(self) -> bool:
         if self._picker_mode in {"resume", "delete-session"}:
@@ -805,6 +926,9 @@ class MemoryTuiApp(App):
         self._memory_picker = []
         self._memory_picker_index = 0
         self._memory_picker_kind = ""
+        self._command_matches = []
+        self._command_match_index = 0
+        self._command_panel_mode = None
         panel = self.query_one("#command_panel", VerticalScroll)
         content = self.query_one("#command_panel_content", Static)
         content.update("")
@@ -846,8 +970,14 @@ class MemoryTuiApp(App):
         text = f"• Tool call {name}"
         if args_summary:
             text = f"{text}\n  └ {args_summary}"
-        self._append_message(
-            "tool", text, self._timeline_text("Tool call", name, args_summary)
+        self._transcript.append(text)
+        self._mount_message_widget(
+            ToolCallMessage(
+                name,
+                args_summary,
+                self._timeline_text("Tool call", name, args_summary),
+                full_content=args,
+            )
         )
         self._append_log("tool call", f"{name}\n{_format_json(args)}")
 
@@ -855,13 +985,20 @@ class MemoryTuiApp(App):
         self._write_tool_result(name, content)
 
     def _write_tool_result(self, name: str, content: Any) -> None:
-        result_summary = self._summarize_value(content)
-        action = tool_result_action(name)
+        presentation = present_tool_result(name, content)
+        result_summary = presentation.summary
+        action = presentation.action
         text = f"• {action} {name}"
         if result_summary:
             text = f"{text}\n  └ {result_summary}"
-        self._append_message(
-            "tool", text, self._timeline_text(action, name, result_summary)
+        self._transcript.append(text)
+        self._mount_message_widget(
+            ToolResultMessage(
+                name,
+                result_summary,
+                self._timeline_text(action, name, result_summary),
+                full_content=content,
+            )
         )
         self._append_log("tool result", f"{name}\n{content}")
 
@@ -870,6 +1007,14 @@ class MemoryTuiApp(App):
             self._show_notice("No assistant message to copy.")
             return
         self._copy_text_with_fallback(self._last_assistant_text, title="Assistant")
+
+    def _toggle_timestamps(self) -> None:
+        self._timestamps_visible = not self._timestamps_visible
+        for widget in self.query(".message"):
+            if hasattr(widget, "set_timestamp_visible"):
+                widget.set_timestamp_visible(self._timestamps_visible)
+        state = "shown" if self._timestamps_visible else "hidden"
+        self._show_notice(f"Message timestamps are now {state}.")
 
     def _show_log_status(self) -> None:
         if self.log_path is None:
@@ -894,17 +1039,22 @@ class MemoryTuiApp(App):
 
     def _append_message(
         self, role: str, text: str, renderable: Any | None = None
-    ) -> Static | Markdown:
+    ) -> Widget:
         self._transcript.append(text)
         widget = self._message_widget(role, text, renderable)
+        self._mount_message_widget(widget)
+        return widget
+
+    def _mount_message_widget(self, widget: Widget) -> None:
+        if hasattr(widget, "set_timestamp_visible"):
+            widget.set_timestamp_visible(self._timestamps_visible)
         self._conversation().mount(widget)
         self._move_working_activity_to_end(after=widget)
         self._scroll_conversation_end()
-        return widget
 
     def _message_widget(
         self, role: str, text: str, renderable: Any | None = None
-    ) -> Static | Markdown:
+    ) -> Widget:
         if renderable is not None:
             if role == "activity":
                 return ActivityMessage(renderable)
@@ -916,15 +1066,14 @@ class MemoryTuiApp(App):
                     name or action,
                     body.removeprefix("  └ ").strip(),
                     renderable,
+                    full_content=body.removeprefix("  └ ").strip(),
                 )
             return Static(renderable, classes=f"message {role}")
         title, _, body = text.partition("\n")
         if role == "assistant":
             widget = AssistantMessage(body or text)
-            widget.border_title = f" {title} " if body else ""
         elif role == "user":
             widget = UserMessage(body or text)
-            widget.border_title = f" {title} " if body else ""
         elif role == "tool":
             detail = body.removeprefix("  └ ").strip()
             if title.startswith("Tool call:"):
@@ -933,7 +1082,8 @@ class MemoryTuiApp(App):
                 )
             elif title.startswith("Tool result:"):
                 widget = ToolResultMessage(
-                    title.removeprefix("Tool result:").strip(), detail
+                    title.removeprefix("Tool result:").strip(),
+                    full_content=detail,
                 )
             else:
                 first_line = title.removeprefix("• ").strip()
@@ -941,9 +1091,9 @@ class MemoryTuiApp(App):
                 if action == "Tool":
                     widget = ToolCallMessage(name.removeprefix("call "), detail)
                 else:
-                    widget = ToolResultMessage(name, detail)
+                    widget = ToolResultMessage(name, full_content=detail)
         elif role == "system":
-            widget = SystemMessage(text)
+            widget = SystemMessage(body or text)
         elif role == "activity":
             widget = ActivityMessage(text)
         else:
@@ -951,15 +1101,18 @@ class MemoryTuiApp(App):
         return widget
 
     async def _mount_resume_messages(self, messages: Iterable[Any]) -> None:
-        widgets: list[Static | Markdown] = []
+        widgets: list[Widget] = []
         for message in messages:
             widgets.extend(self._resume_message_widgets(message))
         if widgets:
+            for widget in widgets:
+                if hasattr(widget, "set_timestamp_visible"):
+                    widget.set_timestamp_visible(self._timestamps_visible)
             await self._conversation().mount(*widgets)
         self._scroll_conversation_end()
 
-    def _resume_message_widgets(self, message: Any) -> list[Static | Markdown]:
-        widgets: list[Static | Markdown] = []
+    def _resume_message_widgets(self, message: Any) -> list[Widget]:
+        widgets: list[Widget] = []
         if isinstance(message, AIMessage):
             if message.content:
                 content = str(message.content)
@@ -1004,7 +1157,7 @@ class MemoryTuiApp(App):
         self._working_widget = self._append_message(
             "activity",
             text,
-            self._timeline_text("Working", "(0s)", style="#8fb3c8"),
+            self._timeline_text("Working", "(0s)", style=TUI_COLORS["primary"]),
         )
         self._append_log("activity", text)
         self._turn_timer = self.set_interval(
@@ -1016,11 +1169,15 @@ class MemoryTuiApp(App):
         self._stop_turn_timer()
         if succeeded:
             text = f"• Worked for {elapsed}"
-            renderable = self._timeline_text("Worked for", elapsed, style="#86c39a")
+            renderable = self._timeline_text(
+                "Worked for", elapsed, style=TUI_COLORS["success"]
+            )
             self._refresh_status("idle")
         else:
             text = f"• Failed after {elapsed}"
-            renderable = self._timeline_text("Failed after", elapsed, style="#d06f6f")
+            renderable = self._timeline_text(
+                "Failed after", elapsed, style=TUI_COLORS["error"]
+            )
             self._refresh_status("error")
         self._update_working_activity(text, renderable)
         self._append_log("activity", text)
@@ -1038,7 +1195,10 @@ class MemoryTuiApp(App):
         self._stop_turn_timer()
         text = f"• Interrupted after {elapsed}"
         self._update_working_activity(
-            text, self._timeline_text("Interrupted after", elapsed, style="#d7b46a")
+            text,
+            self._timeline_text(
+                "Interrupted after", elapsed, style=TUI_COLORS["warning"]
+            ),
         )
         self._append_log("activity", text)
         if turn_id == self._active_turn_id:
@@ -1055,7 +1215,10 @@ class MemoryTuiApp(App):
             elapsed = self._turn_elapsed_text()
             text = f"• Working ({elapsed})"
             self._update_working_activity(
-                text, self._timeline_text("Working", f"({elapsed})", style="#8fb3c8")
+                text,
+                self._timeline_text(
+                    "Working", f"({elapsed})", style=TUI_COLORS["primary"]
+                ),
             )
 
     def _stop_turn_timer(self) -> None:
@@ -1096,7 +1259,7 @@ class MemoryTuiApp(App):
             text = f"{text}\n  └ {summary}"
         renderable = self._timeline_text("Running", name, summary)
         self._transcript.append(text)
-        widget = ToolCallMessage(name, summary, renderable)
+        widget = ToolCallMessage(name, summary, renderable, full_content=args)
         self._conversation().mount(widget)
         self._move_working_activity_to_end(after=widget)
         self._scroll_conversation_end()
@@ -1112,9 +1275,16 @@ class MemoryTuiApp(App):
     def _finish_tool_activity(
         self, tool_key: str, name: str, result: Any, succeeded: bool
     ) -> None:
-        summary = self._summarize_value(result)
-        action = "Ran" if succeeded else "Tool failed"
-        style = "#86c39a" if succeeded else "#d06f6f"
+        presentation = present_tool_result(name, result)
+        summary = presentation.summary
+        action = (
+            presentation.action
+            if succeeded and presentation.domain != "tool"
+            else "Ran"
+            if succeeded
+            else "Tool failed"
+        )
+        style = TUI_COLORS["success"] if succeeded else TUI_COLORS["error"]
         text = f"• {action} {name}"
         if summary:
             text = f"{text}\n  └ {summary}"
@@ -1128,7 +1298,14 @@ class MemoryTuiApp(App):
             widget, old_text = existing
             self._tool_activity_widgets.pop(tool_key, None)
             self._tool_activity_widgets.pop(name, None)
-            widget.set_result(action, name, summary, renderable)
+            widget.set_result(
+                action,
+                name,
+                summary,
+                renderable,
+                full_content=result,
+                domain=presentation.domain,
+            )
             if old_text in self._transcript:
                 self._transcript[self._transcript.index(old_text)] = text
             else:
@@ -1148,9 +1325,7 @@ class MemoryTuiApp(App):
         self._scroll_conversation_end()
         self.call_after_refresh(self._scroll_conversation_end)
 
-    def _move_working_activity_to_end(
-        self, after: Static | Markdown | None = None
-    ) -> None:
+    def _move_working_activity_to_end(self, after: Widget | None = None) -> None:
         if self._working_widget is None or self._working_transcript_index is None:
             return
         if after is self._working_widget:
@@ -1175,15 +1350,15 @@ class MemoryTuiApp(App):
         target: str = "",
         detail: str = "",
         *,
-        style: str = "#7f8c95",
+        style: str = TUI_COLORS["muted"],
     ) -> Text:
-        text = Text("• ", style="#6f8796")
+        text = Text("• ", style=TUI_COLORS["muted"])
         text.append(action, style=style)
         if target:
-            text.append(f" {target}", style="#d7dde2")
+            text.append(f" {target}", style=TUI_COLORS["text"])
         if detail:
-            text.append("\n  └ ", style="#6f8796")
-            text.append(detail, style="#8f9ba4")
+            text.append("\n  └ ", style=TUI_COLORS["muted"])
+            text.append(detail, style=TUI_COLORS["muted"])
         return text
 
     def _summarize_value(self, value: Any, limit: int = 180) -> str:
@@ -1212,12 +1387,14 @@ class MemoryTuiApp(App):
         self.query_one("#agent_status", Static).update(self._status_text())
 
     def _status_text(self) -> str:
-        ctrl_c_action = "interrupt" if self._is_agent_running() else "clear/exit"
-        return (
-            f"user={self.session.user_id} | namespace={self.session.namespace} | "
-            f"thread={self.session.thread_id} | "
-            f"Enter send | Shift+Enter newline | Ctrl+C {ctrl_c_action} | /resume"
-        )
+        if self._is_agent_running():
+            state = (
+                self._status if self._status not in {"idle", "running"} else "Working"
+            )
+            return f"{state} · Ctrl+C to interrupt"
+        thread = self.session.thread_id
+        short_thread = thread if len(thread) <= 16 else f"…{thread[-12:]}"
+        return f"{self.session.user_id} · session {short_thread} · /help"
 
     def _conversation(self) -> VerticalScroll:
         return self.query_one("#conversation", VerticalScroll)
