@@ -15,6 +15,7 @@ from rai.frontend.cli import (
     CliAgentEvent,
     CliTurn,
     MemoryCliSession,
+    _langchain_event_to_cli_events,
     parse_cli_input,
     shutdown_tool_connectors,
 )
@@ -42,6 +43,43 @@ async def _wait_for_transcript(
             return
         await asyncio.sleep(0.05)
     raise AssertionError(f"Timed out waiting for transcript text: {text}")
+
+
+def test_cli_event_adapter_filters_internal_summarization_model() -> None:
+    event = {
+        "event": "on_chat_model_end",
+        "name": "ChatOpenAI",
+        "metadata": {
+            "lc_source": "summarization",
+            "langgraph_node": "context_management",
+        },
+        "data": {"output": AIMessage(content="## SESSION INTENT\ninternal")},
+    }
+
+    assert _langchain_event_to_cli_events(event) == []
+
+
+def test_cli_event_adapter_only_emits_primary_agent_model_output() -> None:
+    internal_event = {
+        "event": "on_chat_model_end",
+        "name": "VisionModel",
+        "metadata": {"langgraph_node": "tools"},
+        "data": {"output": AIMessage(content="internal vision response")},
+    }
+    primary_event = {
+        "event": "on_chat_model_end",
+        "name": "ChatOpenAI",
+        "metadata": {"langgraph_node": "llm"},
+        "data": {"output": AIMessage(content="agent response")},
+    }
+
+    assert _langchain_event_to_cli_events(internal_event) == []
+    events = _langchain_event_to_cli_events(primary_event)
+    assert [event.kind for event in events] == ["status", "message"]
+    assert any(
+        event.kind == "message" and event.message.content == "agent response"
+        for event in events
+    )
 
 
 class _FakeCheckpointer:

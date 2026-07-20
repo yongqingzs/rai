@@ -635,6 +635,19 @@ def _langchain_event_to_cli_events(event: dict[str, Any]) -> list[CliAgentEvent]
     data = event.get("data") or {}
     events: list[CliAgentEvent] = []
 
+    model_events = {
+        "on_chat_model_start",
+        "on_llm_start",
+        "on_chat_model_stream",
+        "on_llm_stream",
+        "on_chat_model_end",
+        "on_llm_end",
+        "on_chat_model_error",
+        "on_llm_error",
+    }
+    if event_type in model_events and not _is_primary_agent_model_event(event):
+        return []
+
     if event_type in {"on_chain_start", "on_chain_stream", "on_chain_end"}:
         if _is_useful_chain_name(name):
             phase = {
@@ -685,6 +698,14 @@ def _langchain_event_to_cli_events(event: dict[str, Any]) -> list[CliAgentEvent]
         )
 
     return events
+
+
+def _is_primary_agent_model_event(event: dict[str, Any]) -> bool:
+    metadata = event.get("metadata") or {}
+    if metadata.get("lc_source") == "summarization":
+        return False
+    node = metadata.get("langgraph_node")
+    return node is None or node == "llm"
 
 
 def _is_useful_chain_name(name: str) -> bool:

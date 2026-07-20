@@ -28,7 +28,6 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from pydantic import Field
-
 from rai.agents.langchain.core.react_agent import create_react_runnable
 from rai.context import (
     ContextBudgetExceeded,
@@ -342,3 +341,143 @@ def test_context_is_checked_between_tool_calls_in_one_user_turn() -> None:
         for message in call
         if isinstance(message, ToolMessage)
     )
+
+
+def test_historical_prefix_is_summarized_once_during_active_tool_turn(
+    monkeypatch,
+) -> None:
+    config = ContextConfig(
+        max_input_tokens=3000,
+        trigger_ratio=0.5,
+        keep_ratio=0.2,
+        max_messages=80,
+        summary_max_tokens=256,
+        chars_per_token=2.0,
+    )
+    manager = _manager(config, ["historical context"])
+    summary_calls = 0
+    original = manager._create_rolling_summary
+
+    def counted_summary(*args, **kwargs):
+        nonlocal summary_calls
+        summary_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_create_rolling_summary", counted_summary)
+    messages: list[BaseMessage] = [
+        SystemMessage(content="robot instructions " + "s" * 2000),
+        HumanMessage(content="old question one " + "x" * 350),
+        AIMessage(content="old answer one " + "y" * 350),
+        HumanMessage(content="old question two " + "x" * 350),
+        AIMessage(content="old answer two " + "y" * 350),
+        HumanMessage(content="inspect three locations"),
+    ]
+
+    first = manager.prepare(messages)
+
+    assert first.compressed
+    assert summary_calls == 1
+    assert [type(message) for message in first.messages] == [
+        SystemMessage,
+        HumanMessage,
+    ]
+
+    active_messages = list(first.messages)
+    for index in range(3):
+        call_id = f"visual-{index}"
+        active_messages.extend(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "analyze_scene",
+                            "args": {"point": index},
+                            "id": call_id,
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content="visual result " + "detail " * 500,
+                    tool_call_id=call_id,
+                ),
+            ]
+        )
+        prepared = manager.prepare(active_messages, summary=first.summary)
+        active_messages = prepared.messages
+
+    assert summary_calls == 1
+    assert all(
+        not (
+            isinstance(message, HumanMessage)
+            and str(message.content).startswith("old question")
+        )
+        for message in active_messages
+    )
+    assert any(
+        "Tool result truncated" in str(message.content)
+        for message in active_messages
+        if isinstance(message, ToolMessage)
+    )
+
+
+def test_react_graph_does_not_resummarize_history_between_tools(monkeypatch) -> None:
+    @tool
+    def inspect_point(point: int) -> str:
+        """Inspect one point and return a large visual result."""
+        return f"point {point} " + "visual detail " * 500
+
+    scripted = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "inspect_point", "args": {"point": index}, "id": f"c{index}"}
+            ],
+        )
+        for index in range(3)
+    ] + [AIMessage(content="inspection complete")]
+    model = _ScriptedToolModel(responses=["unused"], scripted=scripted)
+    manager = _manager(
+        ContextConfig(
+            max_input_tokens=3000,
+            trigger_ratio=0.5,
+            keep_ratio=0.2,
+            max_messages=80,
+            summary_max_tokens=256,
+            chars_per_token=2.0,
+        ),
+        ["historical context"],
+    )
+    summary_calls = 0
+    original = manager._create_rolling_summary
+
+    def counted_summary(*args, **kwargs):
+        nonlocal summary_calls
+        summary_calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_create_rolling_summary", counted_summary)
+    graph = create_react_runnable(
+        llm=model,
+        tools=[inspect_point],
+        context_manager=manager,
+    )
+
+    result = graph.invoke(
+        {
+            "messages": [
+                SystemMessage(content="robot instructions " + "s" * 2000),
+                HumanMessage(content="old question one " + "x" * 350),
+                AIMessage(content="old answer one " + "y" * 350),
+                HumanMessage(content="old question two " + "x" * 350),
+                AIMessage(content="old answer two " + "y" * 350),
+                HumanMessage(content="inspect three locations"),
+            ]
+        }
+    )
+
+    assert summary_calls == 1
+    assert result["summary"] == "historical context"
+    assert result["messages"][-1].content == "inspection complete"
+    assert len([m for m in result["messages"] if isinstance(m, HumanMessage)]) == 1
+    assert len([m for m in result["messages"] if isinstance(m, ToolMessage)]) == 3

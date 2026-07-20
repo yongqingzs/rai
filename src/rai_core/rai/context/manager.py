@@ -21,8 +21,8 @@ from typing import Any, cast
 
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain.agents.middleware.summarization import (
-    ContextSize,
     DEFAULT_SUMMARY_PROMPT,
+    ContextSize,
 )
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -118,11 +118,11 @@ class ContextManager:
         if should_compact and current_turn_start != 0:
             middleware = self._get_middleware()
             cutoff = middleware._determine_cutoff_index(conversation)
-            # Keep the active user turn intact. ToolPolicy derives its deterministic
-            # per-turn counters from these messages; old tool payloads are bounded
-            # below without erasing the calls themselves.
+            # Summarize the complete historical prefix in one pass while preserving
+            # the active user turn. Otherwise a large static prompt/tool schema can
+            # repeatedly trigger summaries that only consume a few old messages.
             if current_turn_start is not None:
-                cutoff = min(cutoff, current_turn_start)
+                cutoff = current_turn_start
             if cutoff > 0:
                 to_summarize, conversation = middleware._partition_messages(
                     conversation, cutoff
