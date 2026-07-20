@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import json
-import operator
 from functools import partial
 from typing import (
     List,
@@ -22,15 +21,23 @@ from typing import (
 )
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain.agents.middleware import SummarizationMiddleware
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+)
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables import Runnable, RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.graph import START, StateGraph
+from langgraph.graph import START, StateGraph, add_messages
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.prebuilt.tool_node import tools_condition
 from langgraph.store.base import BaseStore
 from langgraph.utils.runnable import RunnableCallable
-from typing_extensions import Annotated, TypedDict
+from typing_extensions import Annotated, NotRequired, TypedDict
 
 from rai.agents.langchain.core.tool_runner import ToolRunner
 from rai.agents.langchain.invocation_helpers import (
@@ -39,19 +46,7 @@ from rai.agents.langchain.invocation_helpers import (
 )
 from rai.initialization import get_llm_model
 from rai.messages import SystemMultimodalMessage
-
-SUMMARIZE_PROMPT = """Condense the following conversation into a brief summary while preserving:
-- Key decisions and conclusions
-- User preferences and stated facts
-- Important context for continuing the dialogue
-- Any tool results that are relevant
-
-Write the summary in second person ("You are a robot...", "The user asked...").
-Return ONLY the summary, no preamble.
-
-Conversation:
-{conversation}
-"""
+from rai.context import ContextManager, inject_summary
 
 DEFAULT_TOKEN_THRESHOLD = 8192
 DEFAULT_KEEP_RECENT = 12
@@ -66,7 +61,8 @@ class ReActAgentState(TypedDict):
         List of messages in the conversation (supports checkpointing)
     """
 
-    messages: Annotated[List[BaseMessage], operator.add]
+    messages: Annotated[List[BaseMessage], add_messages]
+    summary: NotRequired[str]
 
 
 def llm_node(
@@ -106,8 +102,10 @@ def llm_node(
         if not has_system:
             new_messages.append(SystemMessage(content=system_prompt))
 
-    # Invoke LLM with system prompt prepended
-    all_msgs = list(new_messages) + list(state["messages"])
+    # Invoke LLM with system prompt and the current compacted summary prepended.
+    all_msgs = _inject_state_summary(
+        list(new_messages) + list(state["messages"]), state.get("summary", "")
+    )
     ai_msg = invoke_llm_with_tracing(llm, all_msgs, config)
     new_messages.append(ai_msg)
 
@@ -131,7 +129,9 @@ async def allm_node(
         if not has_system:
             new_messages.append(SystemMessage(content=system_prompt))
 
-    all_msgs = list(new_messages) + list(state["messages"])
+    all_msgs = _inject_state_summary(
+        list(new_messages) + list(state["messages"]), state.get("summary", "")
+    )
     ai_msg = await ainvoke_llm_with_tracing(llm, all_msgs, config)
     new_messages.append(ai_msg)
 
@@ -144,6 +144,7 @@ def create_react_runnable(
     system_prompt: Optional[str | SystemMultimodalMessage] = None,
     checkpointer: Optional[BaseCheckpointSaver] = None,
     store: Optional[BaseStore] = None,
+    context_manager: ContextManager | None = None,
 ) -> Runnable[ReActAgentState, ReActAgentState]:
     """Create a react agent that can process messages and optionally use tools.
 
@@ -186,7 +187,35 @@ def create_react_runnable(
         return {"messages": new_msgs}
 
     graph = StateGraph(ReActAgentState)
-    graph.add_edge(START, "llm")
+
+    def _prepare_context(state: ReActAgentState):
+        if context_manager is None:
+            return {"summary": state.get("summary", "")}
+        prepared = context_manager.prepare(
+            state["messages"],
+            summary=state.get("summary", ""),
+            tools=tools or [],
+        )
+        if (
+            not prepared.compressed
+            and prepared.truncated_tool_results == 0
+            and prepared.summary == state.get("summary", "")
+        ):
+            return {"summary": prepared.summary}
+        return {
+            "messages": [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                *prepared.messages,
+            ],
+            "summary": prepared.summary,
+        }
+
+    if context_manager is not None:
+        graph.add_node("context_management", _prepare_context)
+        graph.add_edge(START, "context_management")
+        graph.add_edge("context_management", "llm")
+    else:
+        graph.add_edge(START, "llm")
 
     if tools:
         tool_runner = ToolRunner(tools)
@@ -202,7 +231,9 @@ def create_react_runnable(
             "llm",
             tools_condition,
         )
-        graph.add_edge("tools", "llm")
+        graph.add_edge(
+            "tools", "context_management" if context_manager is not None else "llm"
+        )
         # Bind tools to LLM
         bound_llm = cast(BaseChatModel, llm.bind_tools(tools))
         graph.add_node(
@@ -225,6 +256,20 @@ def create_react_runnable(
 
     # Compile the graph
     return graph.compile(checkpointer=checkpointer, store=store)
+
+
+def _inject_state_summary(
+    messages: List[BaseMessage], summary: str
+) -> List[BaseMessage]:
+    if not summary:
+        return messages
+    for index, message in enumerate(messages):
+        if isinstance(message, SystemMessage):
+            updated = message.model_copy(
+                update={"content": inject_summary(str(message.content), summary)}
+            )
+            return [*messages[:index], updated, *messages[index + 1 :]]
+    return [SystemMessage(content=inject_summary("", summary)), *messages]
 
 
 def estimate_tokens(messages: List[BaseMessage]) -> int:
@@ -274,8 +319,8 @@ def summarize_messages(
         {"messages": List[BaseMessage], "summary": str}
         If no compression needed, returns original messages and summary.
     """
-    token_count = estimate_tokens(messages)
-    if token_count <= threshold or len(messages) <= keep_recent:
+    token_count = count_tokens_approximately(messages)
+    if token_count <= threshold:
         return {"messages": messages, "summary": existing_summary}
 
     if llm is None:
@@ -285,23 +330,31 @@ def summarize_messages(
     system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
     conv_msgs = [m for m in messages if not isinstance(m, SystemMessage)]
 
-    # Keep recent messages, summarize the rest
-    recent = conv_msgs[-keep_recent:]
-    to_summarize = conv_msgs[:-keep_recent]
-
-    # Build conversation text for summarization
-    conv_text = "\n".join(f"{type(m).__name__}: {m.content}" for m in to_summarize)
-
-    prompt = SUMMARIZE_PROMPT.format(conversation=conv_text)
-    if existing_summary:
-        prompt = f"Previous summary:\n{existing_summary}\n\n" + prompt
-
-    from langchain_core.messages import HumanMessage
-
-    summary_response = invoke_llm_with_tracing(
-        llm, [HumanMessage(content=prompt)], config
+    middleware = SummarizationMiddleware(
+        model=llm,
+        trigger=("tokens", threshold),
+        keep=("messages", keep_recent),
+        token_counter=count_tokens_approximately,
     )
-    new_summary = summary_response.content
+    cutoff = middleware._determine_cutoff_index(conv_msgs)
+    if cutoff <= 0:
+        middleware = SummarizationMiddleware(
+            model=llm,
+            trigger=("tokens", threshold),
+            keep=("tokens", max(1, threshold // 3)),
+            token_counter=count_tokens_approximately,
+        )
+        cutoff = middleware._determine_cutoff_index(conv_msgs)
+    if cutoff <= 0:
+        return {"messages": messages, "summary": existing_summary}
+    to_summarize, recent = middleware._partition_messages(conv_msgs, cutoff)
+    summary_input: list[BaseMessage] = []
+    if existing_summary:
+        summary_input.append(
+            HumanMessage(content=f"Previous conversation summary:\n{existing_summary}")
+        )
+    summary_input.extend(to_summarize)
+    new_summary = middleware._create_summary(summary_input)
 
     # Rebuild message list with only real recent messages. The summary is returned
     # separately so callers can keep it as state instead of conversation history.

@@ -46,6 +46,18 @@ host = "http://localhost:3000"
 use_langsmith = false
 host = "https://api.smith.langchain.com"
 
+[context]
+# Keep this below the model's advertised window when latency or KV-cache memory
+# is the practical limit (for example on Jetson-class edge devices).
+enabled = true
+max_input_tokens = 12288
+trigger_ratio = 0.67
+keep_ratio = 0.25
+max_messages = 80
+summary_max_tokens = 1024
+chars_per_token = 2.0
+tokens_per_image = 1024
+
 [asr]
 recording_device_name = "default"
 transcription_model = "LocalWhisper"

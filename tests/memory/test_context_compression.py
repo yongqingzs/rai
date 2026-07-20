@@ -105,9 +105,9 @@ def _print_report(
     )
 
 
-def test_default_threshold_requires_both_token_and_message_limits() -> None:
+def test_token_threshold_does_not_require_more_than_keep_recent_messages() -> None:
     messages = _default_threshold_messages()
-    summary_model = FakeListChatModel(responses=["unused"])
+    summary_model = FakeListChatModel(responses=["token-only summary"])
 
     token_only = summarize_messages(
         messages[:DEFAULT_KEEP_RECENT],
@@ -119,8 +119,8 @@ def test_default_threshold_requires_both_token_and_message_limits() -> None:
     )
 
     assert estimate_tokens(messages[:DEFAULT_KEEP_RECENT]) > DEFAULT_TOKEN_THRESHOLD
-    assert token_only["summary"] == ""
-    assert token_only["messages"] == messages[:DEFAULT_KEEP_RECENT]
+    assert token_only["summary"] == "token-only summary"
+    assert len(token_only["messages"]) < DEFAULT_KEEP_RECENT
     assert message_only["summary"] == ""
     assert len(message_only["messages"]) == 13
 
@@ -161,10 +161,10 @@ def test_default_compression_exposes_checkpoint_and_actual_model_context(
     assert isinstance(system_message, SystemMessage)
     assert "## Short-Term Memory Summary" in str(system_message.content)
     assert summary in str(system_message.content)
-    assert len(model_context[1:]) == DEFAULT_KEEP_RECENT
+    assert 0 < len(model_context[1:]) < DEFAULT_KEEP_RECENT
     assert OLD_SENTINEL not in raw_recent
     assert RECENT_SENTINEL in raw_recent
-    assert len(checkpoint_messages) == DEFAULT_KEEP_RECENT + 1
+    assert len(checkpoint_messages) == len(model_context)
 
     _print_report(
         title="DETERMINISTIC CONTEXT COMPRESSION",
