@@ -26,6 +26,14 @@ class MultimodalArtifact(TypedDict, total=False):
     summary: str
 
 
+class StoredArtifactReference(TypedDict):
+    artifact_id: str
+    summary: str
+    images: int
+    raw_images: int
+    audios: int
+
+
 class ToolArtifactRecord(TypedDict, total=False):
     summary: str
     images: List[str]
@@ -73,19 +81,23 @@ def store_artifacts(
 
         stored_artifact: dict[str, Any] = {
             "summary": artifact.get("summary", ""),
-            "audios": artifact.get("audios", []),
+            "audios": [],
             "images": [],
             "raw_images": [],
         }
-        for key in ("images", "raw_images"):
-            images = artifact.get(key, [])
-            if not isinstance(images, list):
+        for key, extension in (
+            ("images", "png"),
+            ("raw_images", "png"),
+            ("audios", "bin"),
+        ):
+            values = artifact.get(key, [])
+            if not isinstance(values, list):
                 continue
-            for image_b64 in images:
-                if not isinstance(image_b64, str):
+            for value_b64 in values:
+                if not isinstance(value_b64, str):
                     continue
-                filename = f"{key}_{image_index:04d}.png"
-                _write_image(image_b64, artifact_dir / filename)
+                filename = f"{key}_{image_index:04d}.{extension}"
+                _write_image(value_b64, artifact_dir / filename)
                 stored_artifact[key].append(filename)
                 image_index += 1
         metadata["artifacts"].append(stored_artifact)
@@ -113,15 +125,18 @@ def get_stored_artifacts(
             continue
         restored_artifact: dict[str, Any] = {
             "summary": artifact.get("summary", ""),
-            "audios": artifact.get("audios", []),
+            "audios": [],
             "images": [],
             "raw_images": [],
         }
-        for key in ("images", "raw_images"):
+        for key in ("images", "raw_images", "audios"):
             for filename in artifact.get(key, []):
                 image_path = artifact_dir / filename
                 if image_path.is_file():
                     restored_artifact[key].append(_read_image(image_path))
+                elif key == "audios" and isinstance(filename, str):
+                    # Older records stored audio base64 directly in metadata.
+                    restored_artifact[key].append(filename)
         restored.append(restored_artifact)
     return restored
 
@@ -142,3 +157,22 @@ def get_tool_artifact_record(
     if records and isinstance(records[0], dict):
         return records[0]
     return None
+
+
+def stored_artifact_reference(
+    tool_call_id: str,
+    artifact: MultimodalArtifact,
+) -> StoredArtifactReference:
+    """Return checkpoint-safe metadata for an externally stored artifact."""
+
+    def count(key: str) -> int:
+        values = artifact.get(key, [])
+        return len(values) if isinstance(values, list) else 0
+
+    return StoredArtifactReference(
+        artifact_id=tool_call_id,
+        summary=str(artifact.get("summary", "")),
+        images=count("images"),
+        raw_images=count("raw_images"),
+        audios=count("audios"),
+    )

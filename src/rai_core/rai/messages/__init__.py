@@ -20,7 +20,13 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from .artifacts import MultimodalArtifact, get_stored_artifacts, store_artifacts
+from .artifacts import (
+    MultimodalArtifact,
+    StoredArtifactReference,
+    get_stored_artifacts,
+    store_artifacts,
+    stored_artifact_reference,
+)
 from .conversion import preprocess_image
 from .multimodal import (
     AIMultimodalMessage,
@@ -37,6 +43,7 @@ __all__ = [
     "HumanMultimodalMessage",
     "MultimodalArtifact",
     "MultimodalMessage",
+    "StoredArtifactReference",
     "SystemMessage",
     "SystemMultimodalMessage",
     "ToolMessage",
@@ -44,4 +51,5 @@ __all__ = [
     "get_stored_artifacts",
     "preprocess_image",
     "store_artifacts",
+    "stored_artifact_reference",
 ]

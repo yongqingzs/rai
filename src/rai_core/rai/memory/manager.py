@@ -176,6 +176,41 @@ class MemoryManager:
                     f"Store setup failed (semantic search may be unavailable): {e}"
                 )
 
+    def prune_checkpoints(self, thread_id: str) -> int:
+        """Prune completed-turn SQLite history while retaining recent recovery points."""
+        if (
+            not self._config.checkpoint_prune_after_turn
+            or self._config.backend != "sqlite"
+            or self._checkpointer is None
+        ):
+            return 0
+        deleted = self._run_on_async_loop(
+            _prune_sqlite_thread_checkpoints(
+                self._checkpointer,
+                thread_id,
+                self._config.checkpoint_keep_per_thread,
+            )
+        )
+        self._warn_if_checkpoint_database_large()
+        return deleted
+
+    def _warn_if_checkpoint_database_large(self) -> None:
+        path = self._config.short_term_path
+        if path == ":memory:":
+            return
+        checkpoint_path = Path(path).expanduser()
+        if not checkpoint_path.exists():
+            return
+        size_mb = checkpoint_path.stat().st_size / (1024 * 1024)
+        if size_mb > self._config.checkpoint_warn_mb:
+            logger.warning(
+                "Checkpoint database is %.1f MiB (configured warning limit: %d MiB). "
+                "Pruning makes pages reusable but does not shrink the SQLite file; "
+                "compact it during maintenance downtime.",
+                size_mb,
+                self._config.checkpoint_warn_mb,
+            )
+
     def stop(self):
         if self._async_loop is not None:
             loop = self._async_loop
@@ -298,6 +333,46 @@ def _create_sqlite_components(
     store = cm_store.__enter__()
     store.setup()
     return checkpointer, store, cm_checker, cm_store
+
+
+async def _prune_sqlite_thread_checkpoints(
+    checkpointer: BaseCheckpointSaver,
+    thread_id: str,
+    keep: int,
+) -> int:
+    conn = getattr(checkpointer, "conn", None)
+    if conn is None:
+        return 0
+
+    async with conn.execute(
+        "SELECT checkpoint_ns, checkpoint_id FROM checkpoints "
+        "WHERE thread_id = ? ORDER BY checkpoint_ns, checkpoint_id DESC",
+        (thread_id,),
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    seen_by_namespace: dict[str, int] = {}
+    stale: list[tuple[str, str, str]] = []
+    for checkpoint_ns, checkpoint_id in rows:
+        count = seen_by_namespace.get(checkpoint_ns, 0)
+        seen_by_namespace[checkpoint_ns] = count + 1
+        if count >= keep:
+            stale.append((thread_id, checkpoint_ns, checkpoint_id))
+    if not stale:
+        return 0
+
+    await conn.executemany(
+        "DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = ? "
+        "AND checkpoint_id = ?",
+        stale,
+    )
+    await conn.executemany(
+        "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? "
+        "AND checkpoint_id = ?",
+        stale,
+    )
+    await conn.commit()
+    return len(stale)
 
 
 def _ensure_sqlite_parent_dir(path: str) -> None:

@@ -304,12 +304,25 @@ class ContextManager:
     ) -> tuple[list[BaseMessage], int]:
         result = list(messages)
         truncated = 0
+        # Bound the work: each result can be shortened at most once. Repeatedly
+        # shaving a small amount from a large payload makes token counting
+        # quadratic and can keep an agent worker busy for minutes.
+        remaining_candidates = {
+            index
+            for index, message in enumerate(result)
+            if isinstance(message, ToolMessage)
+            and isinstance(message.content, str)
+            and self._message_tokens(message) > 64
+        }
         while (
-            current := self.count_tokens(result, summary=summary, tools=tools)
-        ) > token_limit:
+            remaining_candidates
+            and (current := self.count_tokens(result, summary=summary, tools=tools))
+            > token_limit
+        ):
             candidates = [
                 (index, self._message_tokens(message))
                 for index, message in enumerate(result)
+                if index in remaining_candidates
                 if isinstance(message, ToolMessage)
                 and isinstance(message.content, str)
                 and self._message_tokens(message) > 64
@@ -317,16 +330,23 @@ class ContextManager:
             if not candidates:
                 break
             index, message_tokens = max(candidates, key=lambda item: item[1])
+            remaining_candidates.remove(index)
             excess = current - token_limit
-            target = max(32, message_tokens - excess - 32)
+            target = max(1, message_tokens - excess - 64)
             message = cast(ToolMessage, result[index])
             content = self._head_tail(
                 str(message.content),
                 target,
                 suffix=TRUNCATION_NOTICE,
             )
-            result[index] = message.model_copy(update={"content": content})
-            truncated += 1
+            shortened = message.model_copy(update={"content": content})
+            if self._message_tokens(shortened) >= message_tokens:
+                shortened = message.model_copy(
+                    update={"content": TRUNCATION_NOTICE.strip()}
+                )
+            if self._message_tokens(shortened) < message_tokens:
+                result[index] = shortened
+                truncated += 1
         return result, truncated
 
     @staticmethod

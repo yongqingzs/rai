@@ -17,7 +17,11 @@ import logging
 from langchain_core.messages import AIMessage, ToolCall, ToolMessage
 from langchain_core.tools import tool
 from rai.agents.langchain.core import ToolCallGuard, ToolPolicy, ToolRunner
-from rai.messages import HumanMultimodalMessage, ToolMultimodalMessage, preprocess_image
+from rai.messages import (
+    HumanMultimodalMessage,
+    ToolMultimodalMessage,
+    preprocess_image,
+)
 from rai.tools.ros2.cli import ros2_topic
 
 

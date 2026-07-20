@@ -29,7 +29,12 @@ from langgraph.prebuilt.tool_node import msg_content_output
 from langgraph.utils.runnable import RunnableCallable
 from pydantic import ValidationError
 
-from rai.messages import MultimodalArtifact, ToolMultimodalMessage, store_artifacts
+from rai.messages import (
+    MultimodalArtifact,
+    ToolMultimodalMessage,
+    store_artifacts,
+    stored_artifact_reference,
+)
 
 
 @dataclass(frozen=True)
@@ -237,6 +242,31 @@ class ToolRunner(RunnableCallable):
         """Update input with tool outputs."""
         input["messages"].extend(outputs)
 
+    @staticmethod
+    def _persist_artifact(
+        output: ToolMessage,
+    ) -> tuple[MultimodalArtifact | None, ToolMessage]:
+        artifact = output.artifact
+        if artifact is None:
+            return None, output
+        if not isinstance(artifact, dict):
+            raise ValueError(
+                "Artifact must be a dictionary with optional keys: "
+                "'images', 'raw_images', 'audios', 'summary'"
+            )
+
+        multimodal_artifact = cast(MultimodalArtifact, artifact)
+        store_artifacts(output.tool_call_id, [multimodal_artifact])
+        checkpoint_safe_output = output.model_copy(
+            update={
+                "artifact": stored_artifact_reference(
+                    output.tool_call_id,
+                    multimodal_artifact,
+                )
+            }
+        )
+        return multimodal_artifact, checkpoint_safe_output
+
     def _func(self, input: dict[str, Any], config: RunnableConfig) -> Any:
         config["max_concurrency"] = (
             1  # TODO(maciejmajek): use better mechanism for task queueing
@@ -307,15 +337,7 @@ class ToolRunner(RunnableCallable):
                     status="error",
                 )
 
-            if output.artifact is not None:
-                artifact = output.artifact
-                if not isinstance(artifact, dict):
-                    raise ValueError(
-                        "Artifact must be a dictionary with optional keys: 'images', 'audios'"
-                    )
-
-                artifact = cast(MultimodalArtifact, artifact)
-                store_artifacts(output.tool_call_id, [artifact])
+            artifact, checkpoint_safe_output = self._persist_artifact(output)
 
             if artifact is not None and (
                 len(artifact.get("images", [])) > 0
@@ -329,7 +351,7 @@ class ToolRunner(RunnableCallable):
                     audios=artifact.get("audios", []),
                 )
 
-            return output
+            return checkpoint_safe_output
 
         with get_executor_for_config(config) as executor:
             indexed_tool_calls = list(enumerate(message.tool_calls))
@@ -421,15 +443,7 @@ class ToolRunner(RunnableCallable):
                     status="error",
                 )
 
-            if output.artifact is not None:
-                artifact = output.artifact
-                if not isinstance(artifact, dict):
-                    raise ValueError(
-                        "Artifact must be a dictionary with optional keys: 'images', 'audios'"
-                    )
-
-                artifact = cast(MultimodalArtifact, artifact)
-                store_artifacts(output.tool_call_id, [artifact])
+            artifact, checkpoint_safe_output = self._persist_artifact(output)
 
             if artifact is not None and (
                 len(artifact.get("images", [])) > 0
@@ -443,7 +457,7 @@ class ToolRunner(RunnableCallable):
                     audios=artifact.get("audios", []),
                 )
 
-            return output
+            return checkpoint_safe_output
 
         indexed_tool_calls = list(enumerate(message.tool_calls))
         raw_outputs = []

@@ -256,7 +256,13 @@ class MemoryCliSession:
                 self.thread_id,
                 message_count=len(self.messages),
             )
+            self._prune_completed_turn()
         return self.messages[old_count:]
+
+    def _prune_completed_turn(self) -> None:
+        prune = getattr(self.memory_mgr, "prune_checkpoints", None)
+        if callable(prune):
+            prune(self.thread_id)
 
     def invoke(self, turn: CliTurn) -> list[Any]:
         graph_input, config, context = self._prepare_turn(turn)
@@ -359,6 +365,7 @@ class MemoryCliSession:
             self.thread_id,
             message_count=len(self.messages),
         )
+        self._prune_completed_turn()
         yield CliAgentEvent(kind="done", status="done")
 
     def _stream_update_events(self, turn: CliTurn) -> Iterable[CliAgentEvent]:
@@ -430,6 +437,7 @@ class MemoryCliSession:
             self.thread_id,
             message_count=len(self.messages),
         )
+        self._prune_completed_turn()
         yield CliAgentEvent(kind="done", status="done")
 
 

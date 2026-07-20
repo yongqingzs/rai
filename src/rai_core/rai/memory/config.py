@@ -28,6 +28,9 @@ long_term_path = "store.db"
 # backend = "postgres"
 # connection = "postgresql://user:pass@localhost:5432/dbname"
 namespace = "default"
+checkpoint_prune_after_turn = true
+checkpoint_keep_per_thread = 20
+checkpoint_warn_mb = 512
 """
 
 
@@ -39,6 +42,15 @@ class MemoryConfig:
     long_term_path: str = "store.db"
     connection: str = ""
     namespace: str = "default"
+    checkpoint_prune_after_turn: bool = True
+    checkpoint_keep_per_thread: int = 20
+    checkpoint_warn_mb: int = 512
+
+    def __post_init__(self) -> None:
+        if self.checkpoint_keep_per_thread < 1:
+            raise ValueError("memory.checkpoint_keep_per_thread must be positive")
+        if self.checkpoint_warn_mb < 1:
+            raise ValueError("memory.checkpoint_warn_mb must be positive")
 
 
 def load_memory_config(config_path: Optional[str] = None) -> MemoryConfig:

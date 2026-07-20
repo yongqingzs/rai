@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 
 from langchain_core.messages import ToolMessage
-
 from rai.messages import get_stored_artifacts, store_artifacts
 from rai.messages.multimodal import ToolMultimodalMessage
 
@@ -13,7 +12,14 @@ def test_store_artifacts_writes_directory_record(tmp_path: Path):
 
     store_artifacts(
         "tool/call:1",
-        [{"summary": "captured", "images": [], "raw_images": [image_b64], "audios": []}],
+        [
+            {
+                "summary": "captured",
+                "images": [],
+                "raw_images": [image_b64],
+                "audios": [],
+            }
+        ],
         db_path=root,
     )
 
@@ -29,6 +35,21 @@ def test_store_artifacts_writes_directory_record(tmp_path: Path):
     restored = get_stored_artifacts("tool/call:1", db_path=root)
     assert restored[0]["summary"] == "captured"
     assert restored[0]["raw_images"] == [image_b64]
+
+
+def test_store_artifacts_externalizes_audio(tmp_path: Path):
+    audio_b64 = "UklGRg=="
+    root = tmp_path / "artifacts"
+
+    store_artifacts(
+        "audio-call",
+        [{"summary": "audio", "audios": [audio_b64]}],
+        db_path=root,
+    )
+
+    metadata = json.loads((root / "audio-call" / "metadata.json").read_text())
+    assert metadata["artifacts"][0]["audios"] == ["audios_0000.bin"]
+    assert get_stored_artifacts("audio-call", db_path=root)[0]["audios"] == [audio_b64]
 
 
 def test_empty_tool_images_postprocesses_to_plain_tool_message():

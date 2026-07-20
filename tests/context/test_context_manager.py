@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -35,6 +36,7 @@ from rai.context import (
     ContextManager,
     load_context_config,
 )
+from rai.context.manager import TRUNCATION_NOTICE
 from rai.messages import HumanMultimodalMessage
 
 
@@ -142,6 +144,64 @@ def test_active_tool_calls_remain_countable_while_large_results_are_bounded() ->
     assert any("Tool result truncated" in str(message.content) for message in results)
 
 
+def test_large_tool_result_is_truncated_in_one_bounded_pass(monkeypatch) -> None:
+    config = ContextConfig(
+        max_input_tokens=6000,
+        trigger_ratio=0.9,
+        keep_ratio=0.2,
+        max_messages=80,
+        summary_max_tokens=256,
+        chars_per_token=2.0,
+    )
+    manager = _manager(config)
+    message = ToolMessage(
+        content="large visual payload " + "x" * 100_000,
+        tool_call_id="large-result",
+    )
+    calls = 0
+    original = manager._head_tail
+
+    def counted_head_tail(text: str, token_limit: int, *, suffix: str) -> str:
+        nonlocal calls
+        calls += 1
+        return original(text, token_limit, suffix=suffix)
+
+    monkeypatch.setattr(manager, "_head_tail", counted_head_tail)
+    fitted, truncated = manager._fit_tool_results(
+        [message],
+        summary="",
+        tools=[],
+        token_limit=manager._message_tokens(message) - 100,
+    )
+
+    assert truncated == 1
+    assert calls == 1
+    assert manager._message_tokens(fitted[0]) < manager._message_tokens(message)
+
+
+def test_tool_truncation_falls_back_when_content_does_not_shrink(monkeypatch) -> None:
+    manager = _manager(ContextConfig(chars_per_token=2.0))
+    message = ToolMessage(content="x" * 1000, tool_call_id="stuck-result")
+    calls = 0
+
+    def unchanged(text: str, token_limit: int, *, suffix: str) -> str:
+        nonlocal calls
+        calls += 1
+        return text
+
+    monkeypatch.setattr(manager, "_head_tail", unchanged)
+    fitted, truncated = manager._fit_tool_results(
+        [message],
+        summary="",
+        tools=[],
+        token_limit=100,
+    )
+
+    assert calls == 1
+    assert truncated == 1
+    assert fitted[0].content == TRUNCATION_NOTICE.strip()
+
+
 def test_uncompressible_latest_user_input_fails_before_model_call() -> None:
     config = ContextConfig(
         max_input_tokens=512,
@@ -204,6 +264,38 @@ class _ScriptedToolModel(FakeListChatModel):
     ) -> ChatResult:
         self.calls.append(list(messages))
         return ChatResult(generations=[ChatGeneration(message=self.scripted.pop(0))])
+
+
+def test_async_invocation_continues_after_context_compression() -> None:
+    model = _ScriptedToolModel(
+        responses=["unused"],
+        scripted=[AIMessage(content="answer after summary")],
+    )
+    config = ContextConfig(
+        max_input_tokens=4000,
+        trigger_ratio=0.5,
+        keep_ratio=0.2,
+        max_messages=80,
+        summary_max_tokens=256,
+        chars_per_token=2.0,
+    )
+    manager = _manager(config, ["historical summary"])
+    graph = create_react_runnable(llm=model, context_manager=manager)
+    messages: list[BaseMessage] = [
+        HumanMessage(content="old question " + "x" * 6000),
+        AIMessage(content="old answer " + "y" * 6000),
+        HumanMessage(content="new question"),
+    ]
+
+    result = asyncio.run(
+        asyncio.wait_for(
+            graph.ainvoke({"messages": messages}),
+            timeout=3,
+        )
+    )
+
+    assert result["summary"] == "historical summary"
+    assert result["messages"][-1].content == "answer after summary"
 
 
 def test_context_is_checked_between_tool_calls_in_one_user_turn() -> None:

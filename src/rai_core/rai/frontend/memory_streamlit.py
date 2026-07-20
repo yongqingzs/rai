@@ -170,9 +170,11 @@ def render_memory_sidebar(
         "Session (Thread)",
         options=session_options,
         index=default_index,
-        format_func=lambda option: "(new session)"
-        if option == "(new session)"
-        else session_label_by_id.get(option, option),
+        format_func=lambda option: (
+            "(new session)"
+            if option == "(new session)"
+            else session_label_by_id.get(option, option)
+        ),
         help="Different sessions keep separate conversation history.",
     )
 
@@ -345,5 +347,8 @@ def render_memory_chat_input(
                     thread_id=sidebar_state.thread_id,
                     message_count=len(st.session_state.messages),
                 )
+                prune = getattr(memory_mgr, "prune_checkpoints", None)
+                if callable(prune):
+                    prune(sidebar_state.thread_id)
             st.rerun()
         return result

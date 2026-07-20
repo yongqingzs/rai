@@ -83,6 +83,9 @@ short_term_path = "data/checkpoints.db"
 long_term_path = "data/store.db"
 connection = ""
 namespace = "default"
+checkpoint_prune_after_turn = true
+checkpoint_keep_per_thread = 20
+checkpoint_warn_mb = 512
 
 [whoami]
 enabled = true
