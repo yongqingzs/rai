@@ -437,12 +437,19 @@ def test_collect_tool_call_entries_matches_outputs():
     assert entries["ai-1"][0].output == tool_message
 
 
-def test_delete_session_deletes_checkpoint_thread():
+def test_delete_session_deletes_checkpoint_thread(monkeypatch):
     memory_mgr = _MemoryManager()
+    deleted_artifacts = []
+    monkeypatch.setattr(
+        "rai.memory.session.delete_session_artifacts",
+        lambda thread_id: deleted_artifacts.append(thread_id) or 2,
+    )
 
-    delete_session(memory_mgr, "thread-1")
+    deleted = delete_session(memory_mgr, "thread-1")
 
     assert memory_mgr.checkpointer.deleted == ["thread-1"]
+    assert deleted_artifacts == ["thread-1"]
+    assert deleted == 2
 
 
 def test_get_latest_session_id_uses_first_checkpoint():

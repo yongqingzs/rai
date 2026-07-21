@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -18,10 +19,13 @@ from rai.memory.long_term import format_long_term_item, list_long_term_memory_it
 from rai.memory.manager import MemoryManager
 from rai.memory.session import (
     SessionSummary,
+    append_session_transcript_message,
+    append_session_transcript_messages,
     delete_session,
     delete_session_metadata,
     graph_config,
     list_session_summaries,
+    load_session_transcript,
     load_thread_state,
     record_session_activity,
 )
@@ -110,6 +114,7 @@ class MemoryCliSession:
     )
     messages: list[Any] = field(default_factory=list)
     summary: str = ""
+    _active_turn_id: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.reload_thread()
@@ -131,7 +136,11 @@ class MemoryCliSession:
     def resume_session(self, thread_id: str) -> list[Any]:
         self.thread_id = thread_id
         self.reload_thread()
-        return self.messages
+        return load_session_transcript(
+            self.memory_mgr,
+            self.namespace,
+            self.thread_id,
+        )
 
     def handle_resume_command(self, value: str) -> tuple[str, list[Any], bool]:
         quiet = value.endswith(":quiet")
@@ -146,7 +155,7 @@ class MemoryCliSession:
         return list_session_summaries(self.memory_mgr, self.graph, self.namespace)
 
     def delete_session(self, thread_id: str) -> str:
-        delete_session(self.memory_mgr, thread_id)
+        delete_session(self.memory_mgr, thread_id, self.namespace)
         delete_session_metadata(self.memory_mgr, self.namespace, thread_id)
         if thread_id == self.thread_id:
             new_thread_id = self.new_session()
@@ -192,7 +201,13 @@ class MemoryCliSession:
             "user_id": self.user_id,
             "namespace": self.namespace,
             "summary": self.summary,
-            "messages": messages_to_dict(self.messages),
+            "messages": messages_to_dict(
+                load_session_transcript(
+                    self.memory_mgr,
+                    self.namespace,
+                    self.thread_id,
+                )
+            ),
         }
         export_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
         return f"Exported session {self.thread_id} to {export_path}."
@@ -224,7 +239,9 @@ class MemoryCliSession:
     def _prepare_turn(
         self, turn: CliTurn
     ) -> tuple[dict[str, Any], RunnableConfig, Any]:
-        human_msg = HumanMessage(content=turn.text)
+        self._active_turn_id = f"turn-{uuid.uuid4().hex}"
+        human_msg = HumanMessage(content=turn.text, id=self._active_turn_id)
+        self._record_transcript_message(human_msg)
         transient_images = encode_image_paths(turn.images)
         record_session_activity(
             self.memory_mgr,
@@ -250,6 +267,8 @@ class MemoryCliSession:
         if result and "messages" in result:
             self.messages = result["messages"]
             self.summary = result.get("summary", "")
+            new_messages = self._active_turn_messages(old_count)
+            self._record_transcript_messages(new_messages)
             record_session_activity(
                 self.memory_mgr,
                 self.namespace,
@@ -257,7 +276,39 @@ class MemoryCliSession:
                 message_count=len(self.messages),
             )
             self._prune_completed_turn()
+            return new_messages
+        return []
+
+    def _active_turn_messages(self, old_count: int) -> list[Any]:
+        for index, message in enumerate(self.messages):
+            if getattr(message, "id", None) == self._active_turn_id:
+                return self.messages[index + 1 :]
         return self.messages[old_count:]
+
+    def _record_transcript_message(self, message: Any) -> None:
+        if not isinstance(message, (HumanMessage, AIMessage, ToolMessage)):
+            return
+        append_session_transcript_message(
+            self.memory_mgr,
+            self.namespace,
+            self.thread_id,
+            message,
+            turn_id=self._active_turn_id,
+        )
+
+    def _record_transcript_messages(self, messages: list[Any]) -> None:
+        recordable = [
+            message
+            for message in messages
+            if isinstance(message, (HumanMessage, AIMessage, ToolMessage))
+        ]
+        append_session_transcript_messages(
+            self.memory_mgr,
+            self.namespace,
+            self.thread_id,
+            recordable,
+            turn_id=self._active_turn_id,
+        )
 
     def _prune_completed_turn(self) -> None:
         prune = getattr(self.memory_mgr, "prune_checkpoints", None)
@@ -339,6 +390,7 @@ class MemoryCliSession:
                         if key in emitted_keys:
                             continue
                         emitted_keys.add(key)
+                        self._record_transcript_message(cli_event.message)
                     yield cli_event
         except Exception as exc:
             if not _is_astream_events_unsupported_error(exc):
@@ -351,13 +403,14 @@ class MemoryCliSession:
                 loop.close()
 
         self.reload_thread()
-        for message in self.messages[old_count:]:
+        for message in self._active_turn_messages(old_count):
             if not _is_agent_output_message(message):
                 continue
             key = _message_identity(message)
             if key in emitted_keys:
                 continue
             emitted_keys.add(key)
+            self._record_transcript_message(message)
             yield CliAgentEvent(kind="message", message=message)
         record_session_activity(
             self.memory_mgr,
@@ -403,6 +456,7 @@ class MemoryCliSession:
                     if key in emitted_keys:
                         continue
                     emitted_keys.add(key)
+                    self._record_transcript_message(message)
                     yield CliAgentEvent(kind="message", message=message)
         except TypeError as exc:
             message = str(exc)
@@ -421,13 +475,14 @@ class MemoryCliSession:
             return
 
         self.reload_thread()
-        for message in self.messages[old_count:]:
+        for message in self._active_turn_messages(old_count):
             if not _is_agent_output_message(message):
                 continue
             key = _message_identity(message)
             if key in emitted_keys:
                 continue
             emitted_keys.add(key)
+            self._record_transcript_message(message)
             yield CliAgentEvent(kind="message", message=message)
         if last_result and isinstance(last_result, dict):
             self.summary = last_result.get("summary", self.summary)

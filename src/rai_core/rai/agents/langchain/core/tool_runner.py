@@ -245,6 +245,7 @@ class ToolRunner(RunnableCallable):
     @staticmethod
     def _persist_artifact(
         output: ToolMessage,
+        config: RunnableConfig,
     ) -> tuple[MultimodalArtifact | None, ToolMessage]:
         artifact = output.artifact
         if artifact is None:
@@ -256,7 +257,13 @@ class ToolRunner(RunnableCallable):
             )
 
         multimodal_artifact = cast(MultimodalArtifact, artifact)
-        store_artifacts(output.tool_call_id, [multimodal_artifact])
+        configurable = config.get("configurable", {})
+        thread_id = configurable.get("thread_id")
+        store_artifacts(
+            output.tool_call_id,
+            [multimodal_artifact],
+            thread_id=str(thread_id) if thread_id else None,
+        )
         checkpoint_safe_output = output.model_copy(
             update={
                 "artifact": stored_artifact_reference(
@@ -337,7 +344,7 @@ class ToolRunner(RunnableCallable):
                     status="error",
                 )
 
-            artifact, checkpoint_safe_output = self._persist_artifact(output)
+            artifact, checkpoint_safe_output = self._persist_artifact(output, config)
 
             if artifact is not None and (
                 len(artifact.get("images", [])) > 0
@@ -443,7 +450,7 @@ class ToolRunner(RunnableCallable):
                     status="error",
                 )
 
-            artifact, checkpoint_safe_output = self._persist_artifact(output)
+            artifact, checkpoint_safe_output = self._persist_artifact(output, config)
 
             if artifact is not None and (
                 len(artifact.get("images", [])) > 0

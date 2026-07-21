@@ -2,7 +2,11 @@ import json
 from pathlib import Path
 
 from langchain_core.messages import ToolMessage
-from rai.messages import get_stored_artifacts, store_artifacts
+from rai.messages import (
+    delete_session_artifacts,
+    get_stored_artifacts,
+    store_artifacts,
+)
 from rai.messages.multimodal import ToolMultimodalMessage
 
 
@@ -50,6 +54,28 @@ def test_store_artifacts_externalizes_audio(tmp_path: Path):
     metadata = json.loads((root / "audio-call" / "metadata.json").read_text())
     assert metadata["artifacts"][0]["audios"] == ["audios_0000.bin"]
     assert get_stored_artifacts("audio-call", db_path=root)[0]["audios"] == [audio_b64]
+
+
+def test_delete_session_artifacts_only_removes_owned_directories(tmp_path: Path):
+    root = tmp_path / "artifacts"
+    store_artifacts(
+        "session-a-call",
+        [{"summary": "a"}],
+        db_path=root,
+        thread_id="session-a",
+    )
+    store_artifacts(
+        "session-b-call",
+        [{"summary": "b"}],
+        db_path=root,
+        thread_id="session-b",
+    )
+    store_artifacts("legacy-call", [{"summary": "legacy"}], db_path=root)
+
+    assert delete_session_artifacts("session-a", db_path=root) == 1
+    assert not (root / "session-a-call").exists()
+    assert (root / "session-b-call").exists()
+    assert (root / "legacy-call").exists()
 
 
 def test_empty_tool_images_postprocesses_to_plain_tool_message():

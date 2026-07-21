@@ -84,6 +84,7 @@ long_term_path = "data/store.db"
 connection = ""
 namespace = "default"
 checkpoint_prune_after_turn = true
+# Maximum retained root-graph checkpoints per session; completed subgraphs are removed.
 checkpoint_keep_per_thread = 20
 checkpoint_warn_mb = 512
 

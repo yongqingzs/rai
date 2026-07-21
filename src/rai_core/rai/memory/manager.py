@@ -17,7 +17,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Literal, Optional, Tuple
 
 from langchain_core.embeddings import Embeddings
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -177,7 +177,7 @@ class MemoryManager:
                 )
 
     def prune_checkpoints(self, thread_id: str) -> int:
-        """Prune completed-turn SQLite history while retaining recent recovery points."""
+        """Keep bounded root history and remove completed subgraph checkpoints."""
         if (
             not self._config.checkpoint_prune_after_turn
             or self._config.backend != "sqlite"
@@ -193,6 +193,46 @@ class MemoryManager:
         )
         self._warn_if_checkpoint_database_large()
         return deleted
+
+    def delete_thread(self, thread_id: str) -> None:
+        """Delete one checkpoint thread using the active backend's async API."""
+        if self._checkpointer is None:
+            return
+        async_delete = getattr(self._checkpointer, "adelete_thread", None)
+        if callable(async_delete) and self._async_loop is not None:
+            self._run_on_async_loop(async_delete(thread_id))
+            return
+        self._checkpointer.delete_thread(thread_id)
+
+    def put_store_item(
+        self,
+        namespace: tuple[str, ...],
+        key: str,
+        value: dict[str, Any],
+        *,
+        index: Literal[False] | list[str] | None = None,
+    ) -> None:
+        """Write a store item through the backend's matching execution model."""
+        async_put = getattr(self.store, "aput", None)
+        if callable(async_put) and self._async_loop is not None:
+            self._run_on_async_loop(async_put(namespace, key, value, index=index))
+            return
+        self.store.put(namespace, key, value, index=index)
+
+    def get_store_item(self, namespace: tuple[str, ...], key: str) -> Any:
+        """Read a store item without calling an async backend synchronously."""
+        async_get = getattr(self.store, "aget", None)
+        if callable(async_get) and self._async_loop is not None:
+            return self._run_on_async_loop(async_get(namespace, key))
+        return self.store.get(namespace, key)
+
+    def delete_store_item(self, namespace: tuple[str, ...], key: str) -> None:
+        """Delete a store item through the backend's matching execution model."""
+        async_delete = getattr(self.store, "adelete", None)
+        if callable(async_delete) and self._async_loop is not None:
+            self._run_on_async_loop(async_delete(namespace, key))
+            return
+        self.store.delete(namespace, key)
 
     def _warn_if_checkpoint_database_large(self) -> None:
         path = self._config.short_term_path
@@ -345,34 +385,40 @@ async def _prune_sqlite_thread_checkpoints(
         return 0
 
     async with conn.execute(
-        "SELECT checkpoint_ns, checkpoint_id FROM checkpoints "
-        "WHERE thread_id = ? ORDER BY checkpoint_ns, checkpoint_id DESC",
+        "SELECT checkpoint_id FROM checkpoints "
+        "WHERE thread_id = ? AND checkpoint_ns = '' ORDER BY checkpoint_id DESC",
         (thread_id,),
     ) as cursor:
         rows = await cursor.fetchall()
 
-    seen_by_namespace: dict[str, int] = {}
-    stale: list[tuple[str, str, str]] = []
-    for checkpoint_ns, checkpoint_id in rows:
-        count = seen_by_namespace.get(checkpoint_ns, 0)
-        seen_by_namespace[checkpoint_ns] = count + 1
-        if count >= keep:
-            stale.append((thread_id, checkpoint_ns, checkpoint_id))
-    if not stale:
-        return 0
+    stale = [(thread_id, "", checkpoint_id) for (checkpoint_id,) in rows[keep:]]
+    async with conn.execute(
+        "SELECT count(*) FROM checkpoints WHERE thread_id = ? AND checkpoint_ns != ''",
+        (thread_id,),
+    ) as cursor:
+        subgraph_count = int((await cursor.fetchone())[0])
 
-    await conn.executemany(
-        "DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = ? "
-        "AND checkpoint_id = ?",
-        stale,
+    await conn.execute(
+        "DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns != ''",
+        (thread_id,),
     )
-    await conn.executemany(
-        "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? "
-        "AND checkpoint_id = ?",
-        stale,
+    await conn.execute(
+        "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns != ''",
+        (thread_id,),
     )
+    if stale:
+        await conn.executemany(
+            "DELETE FROM writes WHERE thread_id = ? AND checkpoint_ns = ? "
+            "AND checkpoint_id = ?",
+            stale,
+        )
+        await conn.executemany(
+            "DELETE FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? "
+            "AND checkpoint_id = ?",
+            stale,
+        )
     await conn.commit()
-    return len(stale)
+    return len(stale) + subgraph_count
 
 
 def _ensure_sqlite_parent_dir(path: str) -> None:

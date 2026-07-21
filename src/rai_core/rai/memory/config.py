@@ -29,6 +29,7 @@ long_term_path = "store.db"
 # connection = "postgresql://user:pass@localhost:5432/dbname"
 namespace = "default"
 checkpoint_prune_after_turn = true
+# Retained root-graph checkpoints per thread; completed subgraphs are removed.
 checkpoint_keep_per_thread = 20
 checkpoint_warn_mb = 512
 """

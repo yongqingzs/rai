@@ -23,6 +23,7 @@ from langchain_core.messages import (
 from .artifacts import (
     MultimodalArtifact,
     StoredArtifactReference,
+    delete_session_artifacts,
     get_stored_artifacts,
     store_artifacts,
     stored_artifact_reference,
@@ -48,6 +49,7 @@ __all__ = [
     "SystemMultimodalMessage",
     "ToolMessage",
     "ToolMultimodalMessage",
+    "delete_session_artifacts",
     "get_stored_artifacts",
     "preprocess_image",
     "store_artifacts",

@@ -14,9 +14,13 @@
 
 import base64
 import json
+import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Any, List, TypedDict
+
+logger = logging.getLogger(__name__)
 
 
 class MultimodalArtifact(TypedDict, total=False):
@@ -65,12 +69,15 @@ def store_artifacts(
     tool_call_id: str,
     artifacts: List[Any],
     db_path: str | Path = "data/artifacts",
+    *,
+    thread_id: str | None = None,
 ) -> None:
     artifact_dir = _tool_artifact_dir(tool_call_id, db_path)
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     metadata: dict[str, Any] = {
         "tool_call_id": tool_call_id,
+        "thread_id": thread_id,
         "artifacts": [],
     }
     image_index = 0
@@ -106,6 +113,39 @@ def store_artifacts(
         json.dumps(metadata, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def delete_session_artifacts(
+    thread_id: str,
+    db_path: str | Path = "data/artifacts",
+) -> int:
+    """Delete externally stored artifacts owned by one session."""
+    root = _default_artifact_root(db_path)
+    if not root.is_dir():
+        return 0
+
+    deleted = 0
+    for artifact_dir in root.iterdir():
+        if not artifact_dir.is_dir():
+            continue
+        metadata_path = artifact_dir / "metadata.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if metadata.get("thread_id") != thread_id:
+            continue
+        try:
+            shutil.rmtree(artifact_dir)
+            deleted += 1
+        except OSError:
+            logger.warning(
+                "Failed to delete artifact directory %s for thread %s",
+                artifact_dir,
+                thread_id,
+                exc_info=True,
+            )
+    return deleted
 
 
 def get_stored_artifacts(

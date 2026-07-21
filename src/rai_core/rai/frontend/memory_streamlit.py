@@ -14,6 +14,7 @@
 
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -31,12 +32,15 @@ from rai.memory.graph import MemoryAgentContext
 from rai.memory.long_term import format_long_term_item, list_long_term_memory_items
 from rai.memory.manager import MemoryManager
 from rai.memory.session import (
+    append_session_transcript_message,
+    append_session_transcript_messages,
     delete_session,
     delete_session_metadata,
     get_latest_session_id_from_metadata,
     get_session_ids_from_metadata,
     graph_config,
     list_session_summaries,
+    load_session_transcript,
     load_thread_state,
     record_session_activity,
     session_summary_label,
@@ -191,7 +195,7 @@ def render_memory_sidebar(
 
     can_delete_session = thread_id in session_ids
     if st.sidebar.button("Delete Session", disabled=not can_delete_session):
-        delete_session(memory_mgr, thread_id)
+        delete_session(memory_mgr, thread_id, namespace)
         delete_session_metadata(memory_mgr, namespace, thread_id)
         st.session_state.pop("messages", None)
         st.session_state.pop("summary", None)
@@ -285,8 +289,15 @@ def render_memory_sidebar(
         or current_thread != thread_id
         or st.session_state.get("_messages_user") != user_id
     ):
-        restored_messages, restored_summary = load_thread_state(graph, thread_id)
-        st.session_state["messages"] = restored_messages or [welcome_message_factory()]
+        _state_messages, restored_summary = load_thread_state(graph, thread_id)
+        transcript_messages = load_session_transcript(
+            memory_mgr,
+            namespace,
+            thread_id,
+        )
+        st.session_state["messages"] = transcript_messages or [
+            welcome_message_factory()
+        ]
         st.session_state["summary"] = restored_summary
         st.session_state["_last_thread"] = thread_id
         st.session_state["_messages_user"] = user_id
@@ -309,11 +320,19 @@ def render_memory_chat_input(
     if not submission:
         return None
 
-    human_msg = HumanMessage(content=submission.text)
+    turn_id = f"turn-{uuid.uuid4().hex}"
+    human_msg = HumanMessage(content=submission.text, id=turn_id)
     st.session_state.messages.append(human_msg)
     st.chat_message("user").write(submission.text)
     memory_mgr = st.session_state.get("memory_mgr")
     if memory_mgr is not None:
+        append_session_transcript_message(
+            memory_mgr,
+            namespace,
+            sidebar_state.thread_id,
+            human_msg,
+            turn_id=turn_id,
+        )
         record_session_activity(
             memory_mgr=memory_mgr,
             namespace=namespace,
@@ -338,7 +357,30 @@ def render_memory_chat_input(
         )
 
         if result and "messages" in result:
-            st.session_state.messages = result["messages"]
+            result_messages = list(result["messages"])
+            turn_start = next(
+                (
+                    index
+                    for index, message in enumerate(result_messages)
+                    if getattr(message, "id", None) == turn_id
+                ),
+                None,
+            )
+            if memory_mgr is not None and turn_start is not None:
+                append_session_transcript_messages(
+                    memory_mgr,
+                    namespace,
+                    sidebar_state.thread_id,
+                    result_messages[turn_start + 1 :],
+                    turn_id=turn_id,
+                )
+                st.session_state.messages = load_session_transcript(
+                    memory_mgr,
+                    namespace,
+                    sidebar_state.thread_id,
+                )
+            else:
+                st.session_state.messages = result_messages
             st.session_state["summary"] = result.get("summary", "")
             if memory_mgr is not None:
                 record_session_activity(

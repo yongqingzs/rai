@@ -20,15 +20,29 @@ from rai.memory.agent_factory import (
 from rai.memory.config import MemoryConfig, load_memory_config
 from rai.memory.graph import MemoryAgentContext, MemoryState, create_memory_react_agent
 from rai.memory.manager import MemoryManager
+from rai.memory.session import (
+    TranscriptPage,
+    append_session_transcript_message,
+    append_session_transcript_messages,
+    delete_session_transcript,
+    load_session_transcript,
+    load_session_transcript_page,
+)
 
 __all__ = [
     "MemoryAgentContext",
     "MemoryConfig",
     "MemoryManager",
     "MemoryState",
+    "TranscriptPage",
+    "append_session_transcript_message",
+    "append_session_transcript_messages",
     "build_memory_system_prompt",
     "create_default_memory_tools",
     "create_memory_agent_with_tools",
     "create_memory_react_agent",
+    "delete_session_transcript",
     "load_memory_config",
+    "load_session_transcript",
+    "load_session_transcript_page",
 ]

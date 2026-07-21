@@ -20,8 +20,8 @@ from typing import (
     cast,
 )
 
-from langchain_core.language_models import BaseChatModel
 from langchain.agents.middleware import SummarizationMiddleware
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
@@ -44,9 +44,9 @@ from rai.agents.langchain.invocation_helpers import (
     ainvoke_llm_with_tracing,
     invoke_llm_with_tracing,
 )
+from rai.context import ContextManager, inject_summary
 from rai.initialization import get_llm_model
 from rai.messages import SystemMultimodalMessage
-from rai.context import ContextManager, inject_summary
 
 DEFAULT_TOKEN_THRESHOLD = 8192
 DEFAULT_KEEP_RECENT = 12
@@ -255,7 +255,10 @@ def create_react_runnable(
         )
 
     # Compile the graph
-    return graph.compile(checkpointer=checkpointer, store=store)
+    return graph.compile(
+        checkpointer=False if checkpointer is None else checkpointer,
+        store=store,
+    )
 
 
 def _inject_state_summary(

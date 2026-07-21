@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import base64
+import json
 
 from langchain_core.messages import AIMessage, ToolCall, ToolMessage
 from langchain_core.tools import tool
@@ -37,7 +38,10 @@ def test_tool_runner_externalizes_raw_images_before_checkpoint(tmp_path, monkeyp
     call = ToolCall(name="capture_raw_image", args={}, id="capture-1")
     state = {"messages": [AIMessage(content="", tool_calls=[call])]}
 
-    output = runner.invoke(state)
+    output = runner.invoke(
+        state,
+        {"configurable": {"thread_id": "inspection-session"}},
+    )
 
     result = output["messages"][-1]
     assert isinstance(result, ToolMessage)
@@ -52,3 +56,7 @@ def test_tool_runner_externalizes_raw_images_before_checkpoint(tmp_path, monkeyp
     assert image_b64.encode() not in serialized
     assert len(serialized) < 10_000
     assert get_stored_artifacts("capture-1")[0]["raw_images"] == [image_b64]
+    metadata = json.loads(
+        (tmp_path / "data" / "artifacts" / "capture-1" / "metadata.json").read_text()
+    )
+    assert metadata["thread_id"] == "inspection-session"

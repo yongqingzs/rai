@@ -24,6 +24,7 @@ from rai.frontend.tui_widgets import AssistantMessage, ToolResultMessage
 from rai.memory.agent_factory import create_memory_agent_with_tools
 from rai.memory.config import MemoryConfig
 from rai.memory.manager import MemoryManager
+from rai.memory.session import append_session_transcript_messages
 from textual import events
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
@@ -116,8 +117,15 @@ class _FakeStore:
         self.deleted = []
         self.puts = []
 
-    def search(self, namespace, query="", limit=200):
+    def search(self, namespace, query="", limit=200, offset=0):
         schema = namespace[-1]
+        if len(namespace) >= 2 and namespace[-2] == "transcript":
+            items = [
+                SimpleNamespace(key=key, value=value)
+                for stored_namespace, key, value in reversed(self.puts)
+                if stored_namespace == namespace
+            ]
+            return items[offset : offset + limit]
         if schema == "profiles":
             return [
                 SimpleNamespace(key="operator", value={"user_id": "operator"}),
@@ -150,7 +158,7 @@ class _FakeStore:
     def delete(self, namespace, key):
         self.deleted.append((namespace, key))
 
-    def put(self, namespace, key, value):
+    def put(self, namespace, key, value, index=None):
         self.puts.append((namespace, key, value))
 
     def get(self, namespace, key):
@@ -183,6 +191,14 @@ class _FakeStreamingGraph(_FakeGraph):
             AIMessage(content="streamed answer"),
         ]
         yield {"agent": {"messages": self.messages[-2:]}}
+
+
+class _FakeCompactingGraph(_FakeGraph):
+    def invoke(self, **kwargs):
+        self.calls.append(kwargs)
+        human = kwargs["input"]["messages"][0]
+        self.messages = [human, AIMessage(content=f"answer: {human.content}")]
+        return {"messages": self.messages, "summary": "compressed earlier turns"}
 
 
 class _FakeDelayedStreamingGraph(_FakeGraph):
@@ -422,6 +438,32 @@ def test_memory_cli_session_invokes_graph_with_context_and_thread_id(tmp_path):
     summaries_by_id = {summary.thread_id: summary for summary in summaries}
     assert summaries_by_id["session-a"].first_user_message == "hello"
     assert "session-b" not in summaries_by_id
+
+
+def test_memory_cli_transcript_survives_graph_message_compaction():
+    memory_mgr = _FakeMemoryManager()
+    session = MemoryCliSession(
+        memory_mgr=memory_mgr,
+        graph=_FakeCompactingGraph(),
+        namespace="inspection",
+        user_id="operator",
+        thread_id="session-a",
+    )
+
+    session.invoke(CliTurn(text="first task"))
+    session.invoke(CliTurn(text="second task"))
+    restored = session.resume_session("session-a")
+
+    assert [message.content for message in session.messages] == [
+        "second task",
+        "answer: second task",
+    ]
+    assert [message.content for message in restored] == [
+        "first task",
+        "answer: first task",
+        "second task",
+        "answer: second task",
+    ]
 
 
 def test_memory_cli_session_streams_graph_events():
@@ -690,8 +732,18 @@ def test_memory_cli_session_refuses_to_delete_default_user():
 
 
 def test_memory_cli_session_exports_current_session(tmp_path):
+    memory_mgr = _FakeMemoryManager()
+    append_session_transcript_messages(
+        memory_mgr,
+        "inspection",
+        "thread-1",
+        [
+            HumanMessage(content="export question", id="export-user"),
+            AIMessage(content="export answer", id="export-ai"),
+        ],
+    )
     session = MemoryCliSession(
-        memory_mgr=_FakeMemoryManager(),
+        memory_mgr=memory_mgr,
         graph=_FakeGraph(),
         namespace="inspection",
         user_id="operator",
@@ -706,12 +758,25 @@ def test_memory_cli_session_exports_current_session(tmp_path):
     assert '"thread_id": "thread-1"' in exported
     assert '"user_id": "operator"' in exported
     assert '"messages"' in exported
+    assert "export question" in exported
+    assert "export answer" in exported
 
 
 def test_memory_cli_session_resumes_thread_and_loads_messages():
     graph = _FakeGraph()
+    memory_mgr = _FakeMemoryManager()
+    transcript = [
+        HumanMessage(content="old question", id="user-old"),
+        AIMessage(content="old answer", id="ai-old"),
+    ]
+    append_session_transcript_messages(
+        memory_mgr,
+        "inspection",
+        "session-a",
+        transcript,
+    )
     session = MemoryCliSession(
-        memory_mgr=_FakeMemoryManager(),
+        memory_mgr=memory_mgr,
         graph=graph,
         namespace="inspection",
         user_id="operator",
@@ -721,7 +786,11 @@ def test_memory_cli_session_resumes_thread_and_loads_messages():
     messages = session.resume_session("session-a")
 
     assert session.thread_id == "session-a"
-    assert messages == graph.messages
+    assert [message.content for message in messages] == [
+        "old question",
+        "old answer",
+    ]
+    assert session.messages == graph.messages
 
 
 def test_shutdown_tool_connectors_shuts_each_unique_connector_once():
@@ -1543,6 +1612,15 @@ def test_memory_tui_app_resume_picker_resumes_selected_session():
                 AIMessage(content=f"assistant {index}\n" + "markdown text\n" * 4),
             )
         ]
+        append_session_transcript_messages(
+            memory_mgr,
+            "inspection",
+            "session-a",
+            [
+                message.model_copy(update={"id": f"history-{index}"})
+                for index, message in enumerate(graph.messages)
+            ],
+        )
         session = MemoryCliSession(
             memory_mgr=memory_mgr,
             graph=graph,
@@ -1559,6 +1637,9 @@ def test_memory_tui_app_resume_picker_resumes_selected_session():
                 await pilot.pause()
             conversation = app.query_one("#conversation", VerticalScroll)
             assert app.session.thread_id == "session-a"
+            transcript = "\n".join(app._transcript)
+            assert "user 0" in transcript
+            assert "assistant 59" in transcript
             assert conversation.scroll_y == conversation.max_scroll_y
             assert conversation.is_vertical_scroll_end
 
