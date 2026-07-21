@@ -18,7 +18,6 @@ from textual.widget import Widget
 from textual.widgets import Header, Static
 from textual.worker import WorkerState, get_current_worker
 
-from rai.frontend.clipboard import copy_text_to_clipboard
 from rai.frontend.cli import (
     CliAgentEvent,
     CliCommandResult,
@@ -27,6 +26,7 @@ from rai.frontend.cli import (
     _format_json,
     parse_cli_input,
 )
+from rai.frontend.clipboard import copy_text_to_clipboard
 from rai.frontend.tui_adapter import TuiEventAdapter
 from rai.frontend.tui_input import (
     ChatTextArea,
@@ -337,6 +337,8 @@ class MemoryTuiApp(App):
         self._working_widget: ActivityMessage | None = None
         self._working_transcript_index: int | None = None
         self._tool_activity_widgets: dict[str, tuple[ToolCallMessage, str]] = {}
+        self._context_summary_activity: tuple[ActivityMessage, str] | None = None
+        self._context_summary_started_at: float | None = None
         self._event_adapter = TuiEventAdapter(self)
         self._agent_worker: Any | None = None
         self._turn_sequence = 0
@@ -1151,6 +1153,8 @@ class MemoryTuiApp(App):
         self._turn_started_at = monotonic()
         self._stop_turn_timer()
         self._tool_activity_widgets.clear()
+        self._context_summary_activity = None
+        self._context_summary_started_at = None
         self._event_adapter.reset_turn()
         text = "• Working (0s)"
         self._working_transcript_index = len(self._transcript)
@@ -1234,6 +1238,12 @@ class MemoryTuiApp(App):
     def _agent_status_label(self, status: str) -> str:
         if not status:
             return "Working"
+        if status == "context: summarizing":
+            return "Summarizing context"
+        if status == "context: summarized":
+            return "Context summarized"
+        if status == "context: summary error":
+            return "Context summary failed"
         if status.startswith("model: error"):
             return "Model error"
         if status.startswith("model:"):
@@ -1271,6 +1281,55 @@ class MemoryTuiApp(App):
         self, tool_key: str, name: str, result: Any, succeeded: bool
     ) -> None:
         self._finish_tool_activity(tool_key, name, result, succeeded)
+
+    def start_context_summary(self) -> None:
+        self._start_context_summary()
+
+    def _start_context_summary(self) -> None:
+        self._context_summary_started_at = monotonic()
+        text = "• Summarizing conversation context…"
+        renderable = self._timeline_text(
+            "Summarizing conversation context", "…", style=TUI_COLORS["primary"]
+        )
+        if self._context_summary_activity is None:
+            widget = self._append_message("activity", text, renderable)
+        else:
+            widget, old_text = self._context_summary_activity
+            widget.update(renderable)
+            if old_text in self._transcript:
+                self._transcript[self._transcript.index(old_text)] = text
+        self._context_summary_activity = (widget, text)
+        self._move_working_activity_to_end(after=widget)
+        self._scroll_conversation_end()
+        self._append_log("activity", text)
+
+    def finish_context_summary(self, succeeded: bool) -> None:
+        self._finish_context_summary(succeeded)
+
+    def _finish_context_summary(self, succeeded: bool) -> None:
+        elapsed = _format_duration(
+            monotonic() - self._context_summary_started_at
+            if self._context_summary_started_at is not None
+            else 0.0
+        )
+        action = "Context summarized" if succeeded else "Context summarization failed"
+        style = TUI_COLORS["success"] if succeeded else TUI_COLORS["error"]
+        text = f"• {action} ({elapsed})"
+        renderable = self._timeline_text(action, f"({elapsed})", style=style)
+        if self._context_summary_activity is None:
+            widget = self._append_message("activity", text, renderable)
+        else:
+            widget, old_text = self._context_summary_activity
+            widget.update(renderable)
+            if old_text in self._transcript:
+                self._transcript[self._transcript.index(old_text)] = text
+            else:
+                self._transcript.append(text)
+        self._context_summary_activity = (widget, text)
+        self._context_summary_started_at = None
+        self._move_working_activity_to_end(after=widget)
+        self._scroll_conversation_end()
+        self._append_log("activity", text)
 
     def _finish_tool_activity(
         self, tool_key: str, name: str, result: Any, succeeded: bool

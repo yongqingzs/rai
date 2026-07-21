@@ -700,6 +700,18 @@ def _langchain_event_to_cli_events(event: dict[str, Any]) -> list[CliAgentEvent]
         "on_chat_model_error",
         "on_llm_error",
     }
+    if event_type in model_events and _is_summarization_model_event(event):
+        summary_status = {
+            "on_chat_model_start": "context: summarizing",
+            "on_llm_start": "context: summarizing",
+            "on_chat_model_end": "context: summarized",
+            "on_llm_end": "context: summarized",
+            "on_chat_model_error": "context: summary error",
+            "on_llm_error": "context: summary error",
+        }.get(event_type)
+        if summary_status is None:
+            return []
+        return [CliAgentEvent(kind="status", status=summary_status, data=event)]
     if event_type in model_events and not _is_primary_agent_model_event(event):
         return []
 
@@ -761,6 +773,11 @@ def _is_primary_agent_model_event(event: dict[str, Any]) -> bool:
         return False
     node = metadata.get("langgraph_node")
     return node is None or node == "llm"
+
+
+def _is_summarization_model_event(event: dict[str, Any]) -> bool:
+    metadata = event.get("metadata") or {}
+    return metadata.get("lc_source") == "summarization"
 
 
 def _is_useful_chain_name(name: str) -> bool:

@@ -5,11 +5,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import rai.agents.langchain.core.react_agent as react_agent
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.base import BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
 from PIL import Image
 from rai.frontend.cli import (
     CliAgentEvent,
@@ -23,6 +27,7 @@ from rai.frontend.tui import RAI_AGENT_THEME, ChatTextArea, MemoryTuiApp
 from rai.frontend.tui_widgets import AssistantMessage, ToolResultMessage
 from rai.memory.agent_factory import create_memory_agent_with_tools
 from rai.memory.config import MemoryConfig
+from rai.memory.graph import MemoryAgentContext, create_memory_react_agent
 from rai.memory.manager import MemoryManager
 from rai.memory.session import append_session_transcript_messages
 from textual import events
@@ -57,7 +62,86 @@ def test_cli_event_adapter_filters_internal_summarization_model() -> None:
         "data": {"output": AIMessage(content="## SESSION INTENT\ninternal")},
     }
 
-    assert _langchain_event_to_cli_events(event) == []
+    events = _langchain_event_to_cli_events(event)
+
+    assert [item.status for item in events] == ["context: summarized"]
+    assert all(item.kind == "status" and item.message is None for item in events)
+
+
+def test_cli_event_adapter_reports_summarization_lifecycle_without_content() -> None:
+    def event(event_type: str) -> dict[str, Any]:
+        return {
+            "event": event_type,
+            "name": "ChatOpenAI",
+            "metadata": {
+                "lc_source": "summarization",
+                "langgraph_node": "context_management",
+            },
+            "data": {"output": AIMessage(content="internal summary")},
+        }
+
+    start = _langchain_event_to_cli_events(event("on_chat_model_start"))
+    stream = _langchain_event_to_cli_events(event("on_chat_model_stream"))
+    end = _langchain_event_to_cli_events(event("on_chat_model_end"))
+    error = _langchain_event_to_cli_events(event("on_chat_model_error"))
+
+    assert [item.status for item in start] == ["context: summarizing"]
+    assert stream == []
+    assert [item.status for item in end] == ["context: summarized"]
+    assert [item.status for item in error] == ["context: summary error"]
+    assert all(item.message is None for item in [*start, *end, *error])
+
+
+def test_real_agent_stream_reports_summary_status_without_summary_text(
+    monkeypatch,
+) -> None:
+    class _Memory:
+        checkpointer = InMemorySaver()
+        store = InMemoryStore()
+
+    monkeypatch.setattr(
+        react_agent,
+        "get_llm_model",
+        lambda *args, **kwargs: FakeListChatModel(responses=["INTERNAL_SUMMARY"]),
+    )
+    graph = create_memory_react_agent(
+        memory_mgr=_Memory(),
+        llm=FakeListChatModel(responses=["final answer"]),
+        tools=[],
+        system_prompt_builder=lambda context: "system",
+        token_threshold=50,
+        keep_recent=2,
+    )
+
+    async def collect_events() -> tuple[list[str], list[str]]:
+        statuses: list[str] = []
+        outputs: list[str] = []
+        async for event in graph.astream_events(
+            {
+                "messages": [
+                    HumanMessage(content="old " + "x" * 500),
+                    AIMessage(content="old answer " + "y" * 500),
+                    HumanMessage(content="new task"),
+                ]
+            },
+            config={"configurable": {"thread_id": "summary-event-test"}},
+            context=MemoryAgentContext(user_id="test", namespace="test"),
+            version="v2",
+        ):
+            for converted in _langchain_event_to_cli_events(event):
+                if converted.kind == "status":
+                    statuses.append(converted.status)
+                elif converted.message is not None:
+                    outputs.append(str(converted.message.content))
+        return statuses, outputs
+
+    statuses, outputs = asyncio.run(collect_events())
+
+    assert [status for status in statuses if status.startswith("context:")] == [
+        "context: summarizing",
+        "context: summarized",
+    ]
+    assert all("INTERNAL_SUMMARY" not in output for output in outputs)
 
 
 def test_cli_event_adapter_only_emits_primary_agent_model_output() -> None:
@@ -1481,6 +1565,38 @@ def test_memory_tui_app_updates_working_timeline_in_place():
             assert all("• Working" not in item for item in app._transcript)
             conversation = app.query_one("#conversation", VerticalScroll)
             assert conversation.is_vertical_scroll_end
+
+    asyncio.run(run_test())
+
+
+def test_memory_tui_app_updates_context_summary_status_in_place():
+    async def run_test():
+        session = MemoryCliSession(
+            memory_mgr=_FakeMemoryManager(),
+            graph=_FakeGraph(),
+            namespace="inspection",
+            user_id="operator",
+        )
+        app = MemoryTuiApp(session, log_path=None)
+
+        async with app.run_test():
+            app._start_turn_timeline()
+            app._event_adapter.handle_event(
+                CliAgentEvent(kind="status", status="context: summarizing")
+            )
+            assert "• Summarizing conversation context…" in app._transcript
+            assert app._status_text() == "Summarizing context · Ctrl+C to interrupt"
+
+            assert app._context_summary_started_at is not None
+            app._context_summary_started_at -= 4
+            app._event_adapter.handle_event(
+                CliAgentEvent(kind="status", status="context: summarized")
+            )
+            transcript = "\n".join(app._transcript)
+            assert "• Context summarized (4s)" in transcript
+            assert "Summarizing conversation context" not in transcript
+            assert "internal summary" not in transcript
+            assert app._transcript[-1].startswith("• Working")
 
     asyncio.run(run_test())
 

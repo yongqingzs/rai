@@ -28,6 +28,10 @@ class TuiEventRenderer(Protocol):
         self, tool_key: str, name: str, result: Any, succeeded: bool
     ) -> None: ...
 
+    def start_context_summary(self) -> None: ...
+
+    def finish_context_summary(self, succeeded: bool) -> None: ...
+
 
 class TuiEventAdapter:
     """Translate agent stream events into TUI rendering operations."""
@@ -42,7 +46,9 @@ class TuiEventAdapter:
     def handle_event(self, event: CliAgentEvent) -> bool:
         if event.kind == "status":
             self._handle_status_event(event)
-            self._renderer.refresh_status(self._renderer.agent_status_label(event.status))
+            self._renderer.refresh_status(
+                self._renderer.agent_status_label(event.status)
+            )
             return False
         if event.kind == "message" and event.message is not None:
             self.write_messages([event.message])
@@ -65,12 +71,23 @@ class TuiEventAdapter:
                         "tool result", f"{message.name or 'tool'}\n{message.content}"
                     )
                     continue
-                self._renderer.write_tool_result(message.name or "tool", message.content)
+                self._renderer.write_tool_result(
+                    message.name or "tool", message.content
+                )
             elif isinstance(message, HumanMessage):
                 self._renderer.write_user(str(message.content))
 
     def _handle_status_event(self, event: CliAgentEvent) -> None:
         status = event.status
+        if status == "context: summarizing":
+            self._renderer.start_context_summary()
+            return
+        if status == "context: summarized":
+            self._renderer.finish_context_summary(True)
+            return
+        if status == "context: summary error":
+            self._renderer.finish_context_summary(False)
+            return
         if not status.startswith("tool: "):
             return
         tool_name = status.removeprefix("tool: ").rsplit(" ", maxsplit=1)[0]
@@ -80,7 +97,9 @@ class TuiEventAdapter:
             event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
         )
         if status.endswith("starting"):
-            self._renderer.start_tool_activity(tool_key, tool_name, payload.get("input"))
+            self._renderer.start_tool_activity(
+                tool_key, tool_name, payload.get("input")
+            )
         elif status.endswith("done"):
             output = payload.get("output")
             if isinstance(output, ToolMessage) and output.tool_call_id:
